@@ -1,0 +1,85 @@
+// This is your Prisma schema file
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" // Can use "sqlite" for local development
+  url      = env("DATABASE_URL")
+}
+
+model Storyboard {
+  id              String   @id @default(cuid())
+  title           String
+  description     String
+  prompt          String   @db.Text
+  status          String   @default("draft") // draft, processing, completed, failed
+  finalVideoUrl   String?
+  totalDuration   Float?
+  
+  scenes          Scene[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([createdAt])
+}
+
+model Scene {
+  id                  String      @id @default(cuid())
+  storyboardId        String
+  sceneNumber         Int
+  
+  narration           String      @db.Text
+  visualDescription   String      @db.Text
+  manimCode           String      @db.Text // JSON string of Manim operations
+  
+  estimatedDuration   Float
+  actualDuration      Float?
+  
+  audioUrl            String?
+  videoUrl            String?
+  
+  status              String      @default("pending") // pending, processing, completed, failed
+  
+  storyboard          Storyboard  @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
+  
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+  
+  @@unique([storyboardId, sceneNumber])
+  @@index([storyboardId])
+  @@index([status])
+}
+
+// Optional: User model for future authentication
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+// Optional: Render job queue for async processing
+model RenderJob {
+  id            String    @id @default(cuid())
+  sceneId       String?
+  storyboardId  String?
+  
+  type          String    // "scene" or "final"
+  status        String    @default("queued") // queued, processing, completed, failed
+  
+  startedAt     DateTime?
+  completedAt   DateTime?
+  
+  errorMessage  String?   @db.Text
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  @@index([status])
+  @@index([createdAt])
+}
