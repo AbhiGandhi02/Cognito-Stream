@@ -27,10 +27,17 @@ interface VoiceSettings {
 // CONFIGURATION
 // ==========================================
 
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY?.trim() || '';
 const VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ErXwobaYiN019PkySvjV';
 const STORAGE_DIR = path.join(process.cwd(), 'storage', 'audio');
 const BASE_URL = 'https://api.elevenlabs.io/v1';
+
+// Debug: Log API key status on load
+if (ELEVENLABS_API_KEY) {
+  console.log('🔑 ElevenLabs API key loaded');
+} else {
+  console.log('⚠️  No ElevenLabs API key configured');
+}
 
 // Default voice settings for educational content
 const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
@@ -75,7 +82,16 @@ export async function generateAudio(
   }
 
   if (!ELEVENLABS_API_KEY) {
-    throw new Error('ElevenLabs API key not configured');
+    console.log('⚠️  ElevenLabs API key not configured - skipping audio generation');
+    console.log('💡 To enable audio, add ELEVENLABS_API_KEY to your .env file');
+
+    // Return placeholder values so video can still be generated without audio
+    const estimatedDuration = Math.ceil(text.length / 15); // ~15 chars per second
+    return {
+      audioUrl: '', // Empty string indicates no audio
+      duration: estimatedDuration,
+      characterCount: text.length,
+    };
   }
 
   // Ensure storage directory exists
@@ -119,22 +135,35 @@ export async function generateAudio(
       characterCount: text.length,
     };
   } catch (error) {
+    // Log the error but don't throw - return placeholder so video can still be generated
+    let errorMessage = 'Unknown error';
     if (axios.isAxiosError(error)) {
       const status = error.response?.status;
       const message = error.response?.data?.detail?.message || error.message;
 
       if (status === 401) {
-        throw new Error('Invalid ElevenLabs API key');
+        errorMessage = 'Invalid ElevenLabs API key';
       } else if (status === 429) {
-        throw new Error('ElevenLabs rate limit exceeded');
+        errorMessage = 'ElevenLabs rate limit exceeded';
       } else if (status === 400) {
-        throw new Error(`Invalid request: ${message}`);
+        errorMessage = `Invalid request: ${message}`;
       } else {
-        throw new Error(`ElevenLabs API error: ${message}`);
+        errorMessage = `ElevenLabs API error: ${message}`;
       }
+    } else if (error instanceof Error) {
+      errorMessage = error.message;
     }
 
-    throw error;
+    console.error(`⚠️ Audio generation failed: ${errorMessage}`);
+    console.log('💡 Continuing without audio - video will be generated with estimated duration');
+
+    // Return placeholder with estimated duration so video can still be rendered
+    const estimatedDuration = Math.ceil(text.length / 15); // ~15 chars per second
+    return {
+      audioUrl: '',
+      duration: estimatedDuration,
+      characterCount: text.length,
+    };
   }
 }
 

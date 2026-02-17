@@ -1,79 +1,59 @@
-import { useMemo } from 'react';
+/**
+ * ProgressBar — animated progress indicator with percentage.
+ * Used during storyboard processing to show global progress.
+ */
 
 interface ProgressBarProps {
-    value: number;
-    status?: 'idle' | 'processing' | 'completed' | 'failed';
-    showPercentage?: boolean;
-    showLabel?: boolean;
+    progress: number;  // 0-100
     label?: string;
-    size?: 'sm' | 'md' | 'lg';
+    compact?: boolean;
 }
 
-export const ProgressBar = ({
-    value,
-    status = 'idle',
-    showPercentage = true,
-    showLabel = false,
-    label,
-    size = 'md',
-}: ProgressBarProps) => {
-    const clampedValue = Math.min(100, Math.max(0, value));
+export function ProgressBar({ progress, label, compact = false }: ProgressBarProps) {
+    const clamped = Math.max(0, Math.min(100, progress));
 
-    const sizeClasses = useMemo(() => {
-        switch (size) {
-            case 'sm': return 'h-1.5';
-            case 'lg': return 'h-3';
-            default: return 'h-2';
-        }
-    }, [size]);
-
-    const statusColor = useMemo(() => {
-        switch (status) {
-            case 'completed': return 'bg-gradient-to-r from-emerald-500 to-emerald-400';
-            case 'failed': return 'bg-gradient-to-r from-red-500 to-red-400';
-            case 'processing': return 'bg-gradient-to-r from-purple-500 via-purple-400 to-purple-500';
-            default: return 'bg-gradient-to-r from-purple-600 to-purple-400';
-        }
-    }, [status]);
-
-    const statusText = useMemo(() => {
-        switch (status) {
-            case 'completed': return 'Completed';
-            case 'failed': return 'Failed';
-            case 'processing': return 'Processing...';
-            default: return 'Ready';
-        }
-    }, [status]);
+    if (compact) {
+        return (
+            <div className="flex items-center gap-2">
+                <div className="flex-1 h-1 rounded-full bg-surface-800 overflow-hidden">
+                    <div
+                        className="h-full rounded-full bg-gradient-to-r from-brand-500 to-accent-blue transition-all duration-500 ease-out"
+                        style={{ width: `${clamped}%` }}
+                    />
+                </div>
+                <span className="text-[10px] text-surface-200/40 font-mono w-8 text-right">
+                    {Math.round(clamped)}%
+                </span>
+            </div>
+        );
+    }
 
     return (
-        <div className="w-full">
-            {(showLabel || showPercentage) && (
-                <div className="mb-2 flex items-center justify-between text-sm">
-                    {showLabel && (
-                        <span className="text-slate-400">{label || statusText}</span>
-                    )}
-                    {showPercentage && (
-                        <span className="font-semibold text-white">{Math.round(clampedValue)}%</span>
-                    )}
-                </div>
-            )}
-
-            <div className={`relative w-full overflow-hidden rounded-full bg-slate-800 ${sizeClasses}`}>
-                <div
-                    className={`absolute left-0 top-0 h-full rounded-full transition-all duration-500 ease-out ${statusColor}`}
-                    style={{ width: `${clampedValue}%` }}
-                />
+        <div className="glass-light rounded-xl p-4 space-y-2">
+            <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-surface-200/60">
+                    {label || 'Processing'}
+                </span>
+                <span className="text-xs font-mono text-brand-300">
+                    {Math.round(clamped)}%
+                </span>
             </div>
 
-            {status === 'processing' && (
-                <div className="mt-2 flex items-center gap-1">
-                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-purple-500" style={{ animationDelay: '0ms' }} />
-                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-purple-500" style={{ animationDelay: '150ms' }} />
-                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-purple-500" style={{ animationDelay: '300ms' }} />
+            <div className="h-2 rounded-full bg-surface-800/80 overflow-hidden">
+                <div
+                    className="h-full rounded-full bg-gradient-to-r from-brand-500 via-brand-400 to-accent-blue transition-all duration-700 ease-out relative"
+                    style={{ width: `${clamped}%` }}
+                >
+                    {/* Shimmer effect */}
+                    <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-[shimmer_2s_infinite]" />
                 </div>
+            </div>
+
+            {clamped < 100 && (
+                <p className="text-[10px] text-surface-200/30">
+                    Generating scenes, rendering, and processing audio...
+                </p>
             )}
         </div>
     );
-};
-
-export default ProgressBar;
+}

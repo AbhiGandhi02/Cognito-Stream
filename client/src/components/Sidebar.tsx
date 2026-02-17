@@ -1,211 +1,143 @@
-import { useState, useEffect } from 'react';
-import { api, type Storyboard } from '../services/api';
-import { Bars3Icon, XMarkIcon, PlusIcon, TrashIcon, VideoCameraIcon } from '@heroicons/react/24/outline';
+/**
+ * Sidebar — vertical scene timeline with status badges.
+ * Shows all storyboards in a list, plus scene cards for the selected storyboard.
+ */
+
+import { type Scene, type Storyboard } from '../services/api';
 
 interface SidebarProps {
-    isOpen: boolean;
-    onToggle: () => void;
-    currentStoryboardId?: string;
-    onSelectStoryboard: (storyboard: Storyboard) => void;
+    storyboards: Storyboard[];
+    selectedStoryboard: Storyboard | null;
+    selectedScene: Scene | null;
+    onSelectStoryboard: (sb: Storyboard) => void;
+    onSelectScene: (scene: Scene) => void;
     onNewStoryboard: () => void;
 }
 
-const getStatusBadge = (status: string) => {
+function getStatusColor(status: string) {
     switch (status) {
         case 'completed':
-            return <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-400">Done</span>;
+            return 'bg-accent-green/20 text-accent-green border-accent-green/30';
         case 'processing':
-            return <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-400">Processing</span>;
+            return 'bg-brand-400/20 text-brand-300 border-brand-400/30 animate-pulse-glow';
         case 'failed':
-            return <span className="rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">Failed</span>;
+            return 'bg-accent-rose/20 text-accent-rose border-accent-rose/30';
         default:
-            return <span className="rounded-full bg-slate-600/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Draft</span>;
+            return 'bg-surface-700/50 text-surface-200/50 border-surface-700/30';
     }
-};
+}
 
-const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
+function getStatusDot(status: string) {
+    switch (status) {
+        case 'completed':
+            return 'bg-accent-green';
+        case 'processing':
+            return 'bg-brand-400 animate-pulse';
+        case 'failed':
+            return 'bg-accent-rose';
+        default:
+            return 'bg-surface-200/30';
+    }
+}
 
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-};
-
-export const Sidebar = ({
-    isOpen,
-    onToggle,
-    currentStoryboardId,
+export function Sidebar({
+    storyboards,
+    selectedStoryboard,
+    selectedScene,
     onSelectStoryboard,
+    onSelectScene,
     onNewStoryboard,
-}: SidebarProps) => {
-    const [storyboards, setStoryboards] = useState<Storyboard[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [deleting, setDeleting] = useState<string | null>(null);
-
-    const fetchStoryboards = async () => {
-        try {
-            const response = await api.listStoryboards({ limit: 50 });
-            setStoryboards(response.data || []);
-        } catch (error) {
-            console.error('Failed to fetch storyboards:', error);
-            setStoryboards([]);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    useEffect(() => {
-        fetchStoryboards();
-    }, []);
-
-    useEffect(() => {
-        if (currentStoryboardId) {
-            fetchStoryboards();
-        }
-    }, [currentStoryboardId]);
-
-    const handleDelete = async (e: React.MouseEvent, id: string) => {
-        e.stopPropagation();
-        if (!window.confirm('Delete this storyboard?')) return;
-
-        setDeleting(id);
-        try {
-            await api.deleteStoryboard(id);
-            setStoryboards((prev) => prev.filter((s) => s.id !== id));
-        } catch (error) {
-            console.error('Failed to delete storyboard:', error);
-        } finally {
-            setDeleting(null);
-        }
-    };
-
+}: SidebarProps) {
     return (
-        <>
-            {/* Mobile Toggle */}
-            <button
-                className="fixed left-4 top-4 z-50 rounded-lg bg-slate-800 p-2 text-white lg:hidden"
-                onClick={onToggle}
-            >
-                {isOpen ? <XMarkIcon className="h-6 w-6" /> : <Bars3Icon className="h-6 w-6" />}
-            </button>
-
-            {/* Desktop Toggle */}
-            <button
-                className="fixed top-4 z-50 hidden rounded-lg bg-slate-800/80 p-2 text-white backdrop-blur-sm transition-all hover:bg-slate-700 lg:block"
-                onClick={onToggle}
-                style={{ left: isOpen ? '288px' : '16px' }}
-            >
-                {isOpen ? <XMarkIcon className="h-6 w-6" /> : <Bars3Icon className="h-6 w-6" />}
-            </button>
-
-            {/* Mobile Backdrop */}
-            {isOpen && (
-                <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={onToggle} />
-            )}
-
-            {/* Sidebar */}
-            <aside
-                className={`fixed left-0 top-0 z-40 h-full w-72 transform border-r border-slate-800 bg-slate-950 transition-transform duration-300 ${isOpen ? 'translate-x-0' : '-translate-x-full'
-                    }`}
-            >
-                {/* Header */}
-                <div className="flex h-16 items-center justify-between border-b border-slate-800 px-4">
-                    <div className="flex items-center gap-2">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-500/20 text-purple-400">
-                            <VideoCameraIcon className="h-5 w-5" />
-                        </div>
-                        <span className="font-semibold text-white">Cognito Stream</span>
-                    </div>
-                </div>
-
-                {/* New Button */}
-                <div className="p-4">
+        <aside className="w-72 shrink-0 glass-light rounded-2xl flex flex-col overflow-hidden">
+            {/* Header */}
+            <div className="p-4 border-b border-white/5">
+                <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-sm font-semibold text-surface-200/80 uppercase tracking-wider">
+                        Projects
+                    </h2>
                     <button
                         onClick={onNewStoryboard}
-                        className="flex w-full items-center justify-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 font-semibold text-white transition-colors hover:bg-purple-700"
+                        className="text-xs px-3 py-1.5 rounded-lg bg-brand-500/20 text-brand-300 hover:bg-brand-500/30 transition-colors border border-brand-500/20"
                     >
-                        <PlusIcon className="h-5 w-5" />
-                        New Storyboard
+                        + New
                     </button>
                 </div>
 
-                {/* List */}
-                <div className="flex-1 overflow-y-auto px-3 pb-4">
-                    <div className="mb-2 px-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
-                        Recent Projects
-                    </div>
-
-                    {loading ? (
-                        <div className="space-y-2">
-                            {[1, 2, 3].map((i) => (
-                                <div key={i} className="h-16 animate-pulse rounded-lg bg-slate-800" />
-                            ))}
-                        </div>
-                    ) : storyboards.length === 0 ? (
-                        <div className="px-2 py-8 text-center text-sm text-slate-500">
-                            No storyboards yet.
-                            <br />
-                            Create your first one!
-                        </div>
+                {/* Storyboard list */}
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {storyboards.length === 0 ? (
+                        <p className="text-xs text-surface-200/30 italic py-2">
+                            No projects yet
+                        </p>
                     ) : (
-                        <div className="space-y-1">
-                            {storyboards.map((storyboard) => (
-                                <div
-                                    key={storyboard.id}
-                                    className={`group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-200 ${currentStoryboardId === storyboard.id
-                                        ? 'bg-purple-600/20 text-purple-400'
-                                        : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-                                        }`}
-                                    onClick={() => onSelectStoryboard(storyboard)}
-                                >
-                                    <div className="min-w-0 flex-1">
-                                        <div className="flex items-center justify-between gap-2">
-                                            <span className="truncate font-medium text-white">
-                                                {storyboard.title}
-                                            </span>
-                                            {getStatusBadge(storyboard.status)}
-                                        </div>
-                                        <div className="mt-0.5 flex items-center gap-2 text-xs text-slate-500">
-                                            <span>{storyboard.scenes?.length || 0} scenes</span>
-                                            <span>•</span>
-                                            <span>{formatDate(storyboard.createdAt)}</span>
-                                        </div>
-                                    </div>
-
-                                    <button
-                                        onClick={(e) => handleDelete(e, storyboard.id)}
-                                        disabled={deleting === storyboard.id}
-                                        className="ml-2 rounded p-1 text-slate-500 opacity-0 transition-opacity hover:bg-red-500/20 hover:text-red-400 group-hover:opacity-100"
-                                    >
-                                        {deleting === storyboard.id ? (
-                                            <div className="h-4 w-4 animate-spin rounded-full border-2 border-red-400 border-t-transparent" />
-                                        ) : (
-                                            <TrashIcon className="h-4 w-4" />
-                                        )}
-                                    </button>
+                        storyboards.map((sb) => (
+                            <button
+                                key={sb.id}
+                                onClick={() => onSelectStoryboard(sb)}
+                                className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-all ${selectedStoryboard?.id === sb.id
+                                        ? 'bg-brand-500/20 text-brand-200 border border-brand-500/30'
+                                        : 'text-surface-200/60 hover:bg-white/5 border border-transparent'
+                                    }`}
+                            >
+                                <div className="flex items-center gap-2">
+                                    <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${getStatusDot(sb.status)}`} />
+                                    <span className="truncate font-medium">{sb.title || 'Untitled'}</span>
                                 </div>
-                            ))}
-                        </div>
+                            </button>
+                        ))
                     )}
                 </div>
+            </div>
 
-                {/* Footer */}
-                <div className="border-t border-slate-800 p-4">
-                    <div className="text-center text-xs text-slate-500">
-                        Powered by Gemini + Manim
+            {/* Scene timeline */}
+            {selectedStoryboard && (
+                <div className="flex-1 overflow-y-auto p-4">
+                    <h3 className="text-xs font-semibold text-surface-200/60 uppercase tracking-wider mb-3">
+                        Scenes ({selectedStoryboard.scenes?.length || 0})
+                    </h3>
+
+                    <div className="space-y-2">
+                        {selectedStoryboard.scenes?.map((scene, index) => (
+                            <button
+                                key={scene.id}
+                                onClick={() => onSelectScene(scene)}
+                                className={`w-full text-left p-3 rounded-xl transition-all group ${selectedScene?.id === scene.id
+                                        ? 'bg-brand-500/15 border border-brand-500/30 shadow-lg shadow-brand-500/5'
+                                        : 'hover:bg-white/5 border border-transparent'
+                                    }`}
+                            >
+                                {/* Scene number + status */}
+                                <div className="flex items-center justify-between mb-1.5">
+                                    <span className="text-[10px] font-mono text-surface-200/40 uppercase">
+                                        Scene {String(index + 1).padStart(2, '0')}
+                                    </span>
+                                    <span
+                                        className={`text-[9px] px-1.5 py-0.5 rounded-full border ${getStatusColor(
+                                            scene.status
+                                        )}`}
+                                    >
+                                        {scene.status}
+                                    </span>
+                                </div>
+
+                                {/* Narration preview */}
+                                <p className="text-xs text-surface-200/70 line-clamp-2 leading-relaxed">
+                                    {scene.narration?.substring(0, 80)}
+                                    {(scene.narration?.length || 0) > 80 ? '...' : ''}
+                                </p>
+
+                                {/* Duration */}
+                                <div className="flex items-center gap-2 mt-2 text-[10px] text-surface-200/30">
+                                    <span>{scene.actualDuration || scene.estimatedDuration}s</span>
+                                    {scene.videoUrl && <span className="text-accent-green">● Video</span>}
+                                    {scene.audioUrl && <span className="text-accent-blue">● Audio</span>}
+                                </div>
+                            </button>
+                        ))}
                     </div>
                 </div>
-            </aside>
-        </>
+            )}
+        </aside>
     );
-};
-
-export default Sidebar;
+}

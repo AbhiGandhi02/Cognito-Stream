@@ -273,12 +273,25 @@ def render_scene_with_manim(scene_file, scene_id, quality='medium'):
             logger.error(f"Manim error: {result.stderr}")
             raise Exception(f"Manim render failed: {result.stderr}")
         
-        # Find the rendered file
+        # Find the rendered file - Manim puts files in nested directories
         possible_paths = [
             output_file,
             OUTPUT_DIR / 'videos' / f'{scene_id}.mp4',
             OUTPUT_DIR / 'videos' / str(scene_file.stem) / f'{scene_id}.mp4',
         ]
+        
+        # Also search for any mp4 files with our scene_id in the videos directory
+        for mp4_file in OUTPUT_DIR.glob(f'**/*{scene_id}*.mp4'):
+            if mp4_file not in possible_paths:
+                possible_paths.append(mp4_file)
+        
+        # Also try to find any recently created mp4 file (within last 5 minutes)
+        for mp4_file in OUTPUT_DIR.glob('**/*.mp4'):
+            if mp4_file.stat().st_mtime > start_time - 10:  # Created after render started
+                if mp4_file not in possible_paths:
+                    possible_paths.append(mp4_file)
+        
+        logger.info(f"Searching for video in paths: {possible_paths}")
         
         for path in possible_paths:
             if path.exists():
@@ -287,6 +300,12 @@ def render_scene_with_manim(scene_file, scene_id, quality='medium'):
                     shutil.move(str(path), str(output_file))
                 logger.info(f"✓ Render complete: {output_file} ({render_time:.2f}s)")
                 return output_file, render_time
+        
+        # Last resort - find ANY mp4 in the videos folder
+        for mp4_file in list(OUTPUT_DIR.glob('**/*.mp4'))[:1]:
+            logger.info(f"Found fallback video: {mp4_file}")
+            shutil.move(str(mp4_file), str(output_file))
+            return output_file, render_time
         
         raise Exception("Rendered video file not found")
         
@@ -513,6 +532,249 @@ def render_scene():
             'success': False,
             'error': str(e),
             'traceback': traceback.format_exc() if app.debug else None
+        }), 500
+
+# ==========================================
+# ERROR PARSING
+# ==========================================
+
+def parse_manim_errors(stderr, stdout):
+    """Parse Manim error output into structured error info"""
+    
+    parsed_error_summary = None
+    error_type = "UNKNOWN_ERROR"
+    
+    if not stderr:
+        return None
+    
+    if "SyntaxError" in stderr:
+        parsed_error_summary = "Manim rendering failed: Python syntax error in the generated code."
+        error_type = "SYNTAX_ERROR"
+    elif "NameError" in stderr:
+        # Extract the name that wasn't found
+        import re
+        match = re.search(r"NameError: name '(\w+)' is not defined", stderr)
+        name = match.group(1) if match else "unknown"
+        parsed_error_summary = f"Manim rendering failed: '{name}' is not defined. Check imports and variable names."
+        error_type = "NAME_ERROR"
+    elif "TypeError" in stderr:
+        parsed_error_summary = "Manim rendering failed: A function or method was called with wrong arguments."
+        error_type = "TYPE_ERROR"
+    elif "AttributeError" in stderr:
+        import re
+        match = re.search(r"AttributeError: '(\w+)' object has no attribute '(\w+)'", stderr)
+        if match:
+            parsed_error_summary = f"Manim rendering failed: '{match.group(1)}' has no attribute '{match.group(2)}'."
+        else:
+            parsed_error_summary = "Manim rendering failed: An attribute access failed."
+        error_type = "ATTRIBUTE_ERROR"
+    elif "ValueError" in stderr:
+        parsed_error_summary = "Manim rendering failed: Invalid value passed to a function."
+        error_type = "VALUE_ERROR"
+    elif "ImportError" in stderr or "ModuleNotFoundError" in stderr:
+        parsed_error_summary = "Manim rendering failed: A required module could not be imported."
+        error_type = "IMPORT_ERROR"
+    elif "ManimPangoCairoError" in stderr or "TEX" in stdout.upper():
+        parsed_error_summary = "Manim rendering failed: Text rendering or LaTeX compilation error."
+        error_type = "TEXT_RENDERING_ERROR"
+    elif "FileNotFoundError" in stderr:
+        parsed_error_summary = "Manim rendering failed: A required file was not found."
+        error_type = "FILE_NOT_FOUND"
+    elif "ZeroDivisionError" in stderr:
+        parsed_error_summary = "Manim rendering failed: Division by zero in the animation code."
+        error_type = "ZERO_DIVISION"
+    
+    if parsed_error_summary:
+        return {"parsed_error": parsed_error_summary, "error_type": error_type}
+    return None
+
+# ==========================================
+# ROUTE: Render full Python code
+# ==========================================
+
+@app.route('/render-code', methods=['POST'])
+def render_full_code():
+    """Render a scene from full Manim Python code (SculptAI-style pipeline)"""
+    
+    try:
+        data = request.json
+        scene_id = data.get('sceneId')
+        manim_code = data.get('manimCode')
+        quality = data.get('quality', 'medium')
+        
+        if not scene_id or not manim_code:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required fields: sceneId and manimCode'
+            }), 400
+        
+        if not isinstance(manim_code, str):
+            return jsonify({
+                'success': False,
+                'error': 'manimCode must be a string containing full Python code'
+            }), 400
+        
+        logger.info(f"🎬 Rendering full code for scene: {scene_id}")
+        logger.info(f"Code length: {len(manim_code)} chars, Quality: {quality}")
+        
+        stats['total_renders'] += 1
+        
+        # --- Step 1: Lint the code with flake8 ---
+        temp_lint_file = None
+        try:
+            temp_lint_file = TEMP_DIR / f'lint_{scene_id}.py'
+            with open(temp_lint_file, 'w', encoding='utf-8') as f:
+                f.write(manim_code)
+            
+            lint_result = subprocess.run(
+                ['flake8', '--select=F,E9', '--ignore=F403,F405', str(temp_lint_file)],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                timeout=30
+            )
+            
+            if lint_result.returncode != 0:
+                logger.warning(f"Linting failed for scene {scene_id}: {lint_result.stdout}")
+                if temp_lint_file.exists():
+                    temp_lint_file.unlink()
+                return jsonify({
+                    'success': False,
+                    'error': 'Linting failed for the provided Manim code.',
+                    'lint_error': True,
+                    'details_stdout': lint_result.stdout,
+                    'details_stderr': lint_result.stderr,
+                    'error_type': 'LINT_ERROR',
+                    'parsed_error': f'Code has syntax or import errors: {lint_result.stdout[:500]}'
+                }), 400
+            
+            if temp_lint_file.exists():
+                temp_lint_file.unlink()
+                
+        except Exception as lint_e:
+            logger.error(f"Lint setup error for {scene_id}: {lint_e}")
+            if temp_lint_file and temp_lint_file.exists():
+                temp_lint_file.unlink()
+            # Continue without linting — don't block rendering
+        
+        # --- Step 2: Write code and render with Manim ---
+        quality_preset = QUALITY_PRESETS.get(quality, QUALITY_PRESETS['medium'])
+        
+        job_dir = TEMP_DIR / f'job_{scene_id}_{int(time.time())}'
+        os.makedirs(job_dir, exist_ok=True)
+        
+        script_file = job_dir / 'scene_script.py'
+        with open(script_file, 'w', encoding='utf-8') as f:
+            f.write(manim_code)
+        
+        output_file = OUTPUT_DIR / f'{scene_id}.mp4'
+        
+        cmd = [
+            'python', '-m', 'manim',
+            str(script_file),
+            'GeneratedScene',  # Expected class name from our prompt
+            f'-q{quality_preset["quality"][0]}',
+            '--format', 'mp4',
+            '--media_dir', str(job_dir / 'media'),
+            '-o', f'{scene_id}.mp4',
+            '--disable_caching',
+            '--progress_bar', 'none'
+        ]
+        
+        logger.info(f"Executing: {' '.join(cmd)}")
+        
+        start_time = time.time()
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            timeout=300,
+            cwd=str(job_dir)
+        )
+        
+        render_time = time.time() - start_time
+        
+        if result.returncode != 0:
+            logger.error(f"Manim render failed for {scene_id}: {result.stderr[:500]}")
+            
+            parsed = parse_manim_errors(result.stderr, result.stdout)
+            response_payload = {
+                'success': False,
+                'error': 'Manim rendering failed.',
+                'details_stdout': result.stdout,
+                'details_stderr': result.stderr
+            }
+            if parsed:
+                response_payload['parsed_error'] = parsed['parsed_error']
+                response_payload['error_type'] = parsed['error_type']
+            
+            # Cleanup
+            if job_dir.exists():
+                shutil.rmtree(job_dir, ignore_errors=True)
+            
+            return jsonify(response_payload), 500
+        
+        # --- Step 3: Find the rendered video ---
+        # Search for the output video in various locations
+        possible_paths = [output_file]
+        for mp4_file in job_dir.glob('**/*.mp4'):
+            if mp4_file not in possible_paths:
+                possible_paths.append(mp4_file)
+        
+        found_video = None
+        for vpath in possible_paths:
+            if vpath.exists():
+                if vpath != output_file:
+                    shutil.move(str(vpath), str(output_file))
+                found_video = output_file
+                break
+        
+        if not found_video:
+            logger.error(f"Video not found after render for {scene_id}")
+            if job_dir.exists():
+                shutil.rmtree(job_dir, ignore_errors=True)
+            return jsonify({
+                'success': False,
+                'error': 'Rendered video file not found.'
+            }), 500
+        
+        # Get video info
+        video_duration = get_video_duration(output_file)
+        
+        # Cleanup temp directory
+        if job_dir.exists():
+            shutil.rmtree(job_dir, ignore_errors=True)
+        
+        stats['successful_renders'] += 1
+        stats['total_render_time'] += render_time
+        
+        logger.info(f"✓ Code render complete: {scene_id} ({render_time:.2f}s)")
+        
+        return jsonify({
+            'success': True,
+            'videoUrl': f'/videos/{scene_id}.mp4',
+            'sceneId': scene_id,
+            'duration': video_duration,
+            'renderTime': round(render_time, 2)
+        }), 200
+        
+    except subprocess.TimeoutExpired:
+        logger.error(f"Render timed out for scene {scene_id}")
+        stats['failed_renders'] += 1
+        return jsonify({
+            'success': False,
+            'error': 'Manim rendering timed out (5 min limit).',
+            'error_type': 'TIMEOUT'
+        }), 504
+    except Exception as e:
+        logger.error(f"❌ Code render error: {str(e)}")
+        logger.error(traceback.format_exc())
+        stats['failed_renders'] += 1
+        return jsonify({
+            'success': False,
+            'error': str(e)
         }), 500
 
 @app.route('/assemble', methods=['POST'])

@@ -1,4 +1,12 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import {
+  MANIM_CODE_SYSTEM_PROMPT,
+  CODE_CORRECTION_SYSTEM_PROMPT,
+  buildCodeGenPrompt,
+  buildCodeCorrectionPrompt,
+  type SceneCodeGenParams,
+  type CodeCorrectionParams,
+} from './prompts';
 
 // ==========================================
 // TYPES
@@ -138,12 +146,12 @@ export async function generateStoryboard(
   console.log(`📝 Prompt: "${prompt.substring(0, 100)}..."`);
 
   const model = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash-exp',
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite',
     generationConfig: {
       responseMimeType: 'application/json',
       responseSchema: responseSchema as any,
       temperature: 0.7,
-      maxOutputTokens: 4096,
+      maxOutputTokens: 8192, // Increased to prevent truncation
     },
   });
 
@@ -159,7 +167,7 @@ export async function generateStoryboard(
       ]);
 
       const response = result.response.text();
-      
+
       if (!response) {
         throw new Error('Empty response from Gemini');
       }
@@ -328,7 +336,7 @@ export async function regenerateScene(
   sceneNumber: number
 ): Promise<StoryboardScene> {
   const model = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash-exp',
+    model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
     generationConfig: {
       responseMimeType: 'application/json',
       temperature: 0.8,
@@ -361,6 +369,123 @@ Return as JSON with this structure:
 }
 
 // ==========================================
+// MANIM CODE GENERATION (Full Python Code)
+// ==========================================
+
+/**
+ * Generate a complete Manim Python scene class for a single scene.
+ * Returns the raw Python code string.
+ */
+export async function generateManimSceneCode(
+  params: SceneCodeGenParams,
+  maxRetries: number = 2
+): Promise<string> {
+  console.log(`🎨 Generating Manim code for scene ${params.sceneNumber}: "${params.sceneTitle}"`);
+
+  const model = genAI.getGenerativeModel({
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite',
+    generationConfig: {
+      temperature: 0.4, // Lower temp for more reliable code
+      maxOutputTokens: 4096,
+    },
+  });
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`🔄 Code generation attempt ${attempt}/${maxRetries}`);
+
+      const result = await model.generateContent([
+        { text: MANIM_CODE_SYSTEM_PROMPT },
+        { text: buildCodeGenPrompt(params) },
+      ]);
+
+      let code = result.response.text();
+
+      if (!code || code.trim().length === 0) {
+        throw new Error('Empty code response from Gemini');
+      }
+
+      // Strip markdown fences if present
+      code = stripMarkdownFences(code);
+
+      // Basic validation
+      if (!code.includes('class GeneratedScene')) {
+        throw new Error('Generated code missing GeneratedScene class');
+      }
+      if (!code.includes('def construct')) {
+        throw new Error('Generated code missing construct method');
+      }
+
+      console.log(`✅ Manim code generated (${code.length} chars)`);
+      return code;
+    } catch (error) {
+      lastError = error as Error;
+      console.error(`❌ Code generation attempt ${attempt} failed:`, error);
+
+      if (attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 1000;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  throw new Error(
+    `Failed to generate Manim code after ${maxRetries} attempts: ${lastError?.message}`
+  );
+}
+
+/**
+ * Attempt to correct failing Manim code using Gemini.
+ * Returns the corrected Python code string.
+ */
+export async function correctManimCode(
+  params: CodeCorrectionParams
+): Promise<string> {
+  console.log(`🔧 Correcting Manim code (attempt ${params.attemptNumber})...`);
+
+  const model = genAI.getGenerativeModel({
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite',
+    generationConfig: {
+      temperature: 0.2, // Very low temp for precise fixes
+      maxOutputTokens: 4096,
+    },
+  });
+
+  const result = await model.generateContent([
+    { text: CODE_CORRECTION_SYSTEM_PROMPT },
+    { text: buildCodeCorrectionPrompt(params) },
+  ]);
+
+  let code = result.response.text();
+
+  if (!code || code.trim().length === 0) {
+    throw new Error('Empty correction response from Gemini');
+  }
+
+  // Strip markdown fences if present
+  code = stripMarkdownFences(code);
+
+  if (!code.includes('class GeneratedScene')) {
+    throw new Error('Corrected code missing GeneratedScene class');
+  }
+
+  console.log(`✅ Code corrected (${code.length} chars)`);
+  return code;
+}
+
+/**
+ * Strip markdown code fences from LLM output.
+ */
+function stripMarkdownFences(code: string): string {
+  // Remove ```python ... ``` wrapping
+  code = code.replace(/^```(?:python)?\s*\n?/i, '');
+  code = code.replace(/\n?```\s*$/i, '');
+  return code.trim();
+}
+
+// ==========================================
 // EXPORT
 // ==========================================
 
@@ -368,4 +493,6 @@ export default {
   generateStoryboard,
   generateStoryboardWithConfig,
   regenerateScene,
+  generateManimSceneCode,
+  correctManimCode,
 };

@@ -29,6 +29,7 @@ export interface Storyboard {
 
 export interface CreateStoryboardRequest {
   prompt: string;
+  autoGenerate?: boolean;
 }
 
 export interface UpdateSceneRequest {
@@ -42,7 +43,7 @@ class CognitoStreamAPI {
 
   constructor() {
     this.client = axios.create({
-      baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3001',
+      baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3000',
       headers: {
         'Content-Type': 'application/json',
       },
@@ -90,6 +91,14 @@ class CognitoStreamAPI {
    */
   async createStoryboard(data: CreateStoryboardRequest): Promise<Storyboard> {
     const response = await this.client.post('/api/storyboard', data);
+    return response.data;
+  }
+
+  /**
+   * Create a test storyboard without using Gemini API (for testing rendering)
+   */
+  async createTestStoryboard(): Promise<Storyboard> {
+    const response = await this.client.post('/api/storyboard/test');
     return response.data;
   }
 

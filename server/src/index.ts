@@ -51,6 +51,11 @@ app.post('/api/storyboard/:id/render', async (req, res) => {
 const audioPath = path.join(__dirname, '../../storage/audio');
 app.use('/audio', express.static(audioPath));
 
+// Serve video files
+const videoPath = path.join(__dirname, '../../storage/output');
+app.use('/video', express.static(videoPath));
+console.log(`📁 Video files: ${videoPath}`);
+
 // ==========================================
 // ERROR HANDLING
 // ==========================================
@@ -67,7 +72,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 // START SERVER
 // ==========================================
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`🚀 Cognito Stream API Server running on port ${PORT}`);

@@ -1,60 +1,97 @@
-import { useState, useEffect } from 'react';
+/**
+ * App — main application shell for Cognito Stream.
+ *
+ * Two-state layout:
+ *   1. Landing page (no storyboard selected) — prompt input with hero section
+ *   2. Workspace (storyboard selected) — sidebar + editor + player
+ */
+
+import { useState, useEffect, useCallback } from 'react';
 import { api, type Scene, type Storyboard } from './services/api';
-import { SceneEditor } from './components/SceneEditor';
-import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
+import { Sidebar } from './components/Sidebar';
+import { SceneEditor } from './components/SceneEditor';
 import { VideoPlayer } from './components/VideoPlayer';
 import { ProgressBar } from './components/ProgressBar';
-import { ArrowPathIcon, VideoCameraIcon, ArrowDownTrayIcon, SparklesIcon } from '@heroicons/react/24/outline';
+import {
+  SparklesIcon,
+  ArrowDownTrayIcon,
+  ArrowPathIcon,
+  VideoCameraIcon,
+} from '@heroicons/react/24/outline';
 import './index.css';
 
-const getStatusBadge = (status: string) => {
-  switch (status) {
-    case 'completed':
-      return <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/20 px-2.5 py-1 text-xs font-semibold text-emerald-300">completed</span>;
-    case 'processing':
-      return <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/20 px-2.5 py-1 text-xs font-semibold text-amber-300">processing</span>;
-    case 'failed':
-      return <span className="inline-flex items-center gap-1.5 rounded-full bg-red-500/20 px-2.5 py-1 text-xs font-semibold text-red-300">failed</span>;
-    default:
-      return <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-500/20 px-2.5 py-1 text-xs font-semibold text-blue-300">draft</span>;
-  }
-};
-
 function App() {
+  // ==========================================
+  // STATE
+  // ==========================================
   const [prompt, setPrompt] = useState('');
+  const [storyboards, setStoryboards] = useState<Storyboard[]>([]);
   const [storyboard, setStoryboard] = useState<Storyboard | null>(null);
+  const [selectedScene, setSelectedScene] = useState<Scene | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>();
   const [rendering, setRendering] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [error, setError] = useState<string>();
+  const [isConnected, setIsConnected] = useState(false);
 
-  useEffect(() => {
-    const saved = localStorage.getItem('sidebarOpen');
-    if (saved !== null) setSidebarOpen(JSON.parse(saved));
+  // ==========================================
+  // DATA FETCHING
+  // ==========================================
+
+  const fetchStoryboards = useCallback(async () => {
+    try {
+      const data = await api.listStoryboards({ limit: 20 });
+      setStoryboards(data.data || []);
+      setIsConnected(true);
+    } catch {
+      setIsConnected(false);
+    }
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem('sidebarOpen', JSON.stringify(sidebarOpen));
-  }, [sidebarOpen]);
-
-  const refreshStoryboard = async (id: string) => {
+  const refreshStoryboard = useCallback(async (id: string) => {
     try {
       const fresh = await api.getStoryboard(id);
       setStoryboard(fresh);
+      // Update in list too
+      setStoryboards((prev) =>
+        prev.map((sb) => (sb.id === id ? fresh : sb))
+      );
     } catch (err) {
       setError((err as Error).message);
     }
-  };
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    fetchStoryboards();
+  }, [fetchStoryboards]);
+
+  // Auto-poll while processing
+  useEffect(() => {
+    if (!storyboard || storyboard.status !== 'processing') return;
+
+    const interval = setInterval(() => {
+      refreshStoryboard(storyboard.id);
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [storyboard?.id, storyboard?.status, refreshStoryboard]);
+
+  // ==========================================
+  // HANDLERS
+  // ==========================================
 
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
     setLoading(true);
     setError(undefined);
     try {
-      const sb = await api.createStoryboard({ prompt });
+      const sb = await api.createStoryboard({ prompt, autoGenerate: true });
       setStoryboard(sb);
+      setSelectedScene(sb.scenes?.[0] || null);
       setPrompt('');
+      // Add to list
+      setStoryboards((prev) => [sb, ...prev]);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -62,25 +99,56 @@ function App() {
     }
   };
 
-  const handleSceneSave = async (sceneId: string, payload: { narration: string; manimOperations: string[] }) => {
-    const updatedScene = await api.updateScene(sceneId, {
+  const handleTestGenerate = async () => {
+    setLoading(true);
+    setError(undefined);
+    try {
+      const sb = await api.createTestStoryboard();
+      setStoryboard(sb);
+      setSelectedScene(sb.scenes?.[0] || null);
+      setStoryboards((prev) => [sb, ...prev]);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSceneSave = async (
+    sceneId: string,
+    payload: { narration: string; manimOperations: string[] }
+  ) => {
+    const updated = await api.updateScene(sceneId, {
       narration: payload.narration,
       manimCode: payload.manimOperations as unknown as string,
     });
     setStoryboard((prev) =>
-      prev ? { ...prev, scenes: prev.scenes.map((s) => (s.id === updatedScene.id ? updatedScene : s)) } : prev
+      prev
+        ? { ...prev, scenes: prev.scenes.map((s) => (s.id === updated.id ? updated : s)) }
+        : prev
     );
+    if (selectedScene?.id === updated.id) setSelectedScene(updated);
   };
 
   const handleSceneProcess = async (sceneId: string) => {
     setStoryboard((prev) =>
-      prev ? { ...prev, scenes: prev.scenes.map((s) => (s.id === sceneId ? { ...s, status: 'processing' as const } : s)) } : prev
+      prev
+        ? {
+          ...prev,
+          scenes: prev.scenes.map((s) =>
+            s.id === sceneId ? { ...s, status: 'processing' as const } : s
+          ),
+        }
+        : prev
     );
     try {
-      const updatedScene = await api.processScene(sceneId);
+      const updated = await api.processScene(sceneId);
       setStoryboard((prev) =>
-        prev ? { ...prev, scenes: prev.scenes.map((s) => (s.id === updatedScene.id ? updatedScene : s)) } : prev
+        prev
+          ? { ...prev, scenes: prev.scenes.map((s) => (s.id === updated.id ? updated : s)) }
+          : prev
       );
+      if (selectedScene?.id === updated.id) setSelectedScene(updated);
     } catch (err) {
       if (storyboard) refreshStoryboard(storyboard.id);
       throw err;
@@ -103,197 +171,281 @@ function App() {
 
   const handleSelectStoryboard = (sb: Storyboard) => {
     setStoryboard(sb);
-    setPrompt('');
+    setSelectedScene(sb.scenes?.[0] || null);
     setError(undefined);
-    if (window.innerWidth < 1024) setSidebarOpen(false);
   };
 
   const handleNewStoryboard = () => {
     setStoryboard(null);
+    setSelectedScene(null);
     setPrompt('');
     setError(undefined);
-    if (window.innerWidth < 1024) setSidebarOpen(false);
   };
 
   const handleDownload = async () => {
     if (!storyboard?.finalVideoUrl) return;
     try {
-      await api.downloadVideo(storyboard.finalVideoUrl, `${storyboard.title.replace(/[^a-z0-9]/gi, '_')}.mp4`);
+      await api.downloadVideo(
+        storyboard.finalVideoUrl,
+        `${storyboard.title.replace(/[^a-z0-9]/gi, '_')}.mp4`
+      );
     } catch {
-      setError('Download failed. Try right-clicking the video and saving it.');
+      setError('Download failed. Try right-clicking the video.');
     }
   };
+
+  // ==========================================
+  // COMPUTED
+  // ==========================================
 
   const completedScenes = storyboard?.scenes.filter((s) => s.status === 'completed').length || 0;
   const totalScenes = storyboard?.scenes.length || 0;
   const progress = totalScenes > 0 ? (completedScenes / totalScenes) * 100 : 0;
   const allScenesCompleted = completedScenes === totalScenes && totalScenes > 0;
 
+  // ==========================================
+  // RENDER
+  // ==========================================
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-900 via-slate-950 to-black text-white">
-      <Sidebar
-        isOpen={sidebarOpen}
-        onToggle={() => setSidebarOpen(!sidebarOpen)}
-        currentStoryboardId={storyboard?.id}
-        onSelectStoryboard={handleSelectStoryboard}
-        onNewStoryboard={handleNewStoryboard}
-      />
+    <div className="min-h-screen bg-surface-950 text-surface-100 flex flex-col">
+      <Header isConnected={isConnected} />
 
-      <main className={`min-h-screen px-4 py-6 transition-[margin] duration-300 sm:px-6 lg:px-8 lg:py-10 ${sidebarOpen ? 'lg:ml-72' : ''}`}>
-        <div className="mx-auto max-w-5xl">
-          {!storyboard ? (
-            <>
-              <Header showPromptForm />
+      {!storyboard ? (
+        /* ====================== LANDING PAGE ====================== */
+        <main className="flex-1 flex items-center justify-center px-4 py-16">
+          <div className="w-full max-w-2xl space-y-10">
+            {/* Hero */}
+            <div className="text-center space-y-3">
+              <h2 className="text-4xl font-bold tracking-tight">
+                <span className="gradient-text">Transform Ideas</span>{' '}
+                <span className="text-surface-200/80">into Animated Videos</span>
+              </h2>
+              <p className="text-surface-200/50 text-lg max-w-lg mx-auto">
+                Describe any concept and watch it come alive as a narrated 2D animation —
+                powered by AI.
+              </p>
+            </div>
 
-              <div className="mt-8">
-                <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                  <label className="mb-2 block text-sm font-semibold text-slate-200">
-                    What would you like to learn about?
-                  </label>
-                  <textarea
-                    className="w-full resize-none rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-white placeholder:text-slate-500 transition-all duration-200 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20"
-                    rows={4}
-                    placeholder="e.g., Explain the Pythagorean theorem for middle schoolers with visual examples..."
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && e.metaKey) handleGenerate();
-                    }}
-                  />
+            {/* Prompt card */}
+            <div className="glass rounded-2xl p-6 space-y-4">
+              <label className="text-sm font-medium text-surface-200/60">
+                What would you like to learn about?
+              </label>
+              <textarea
+                className="w-full resize-none rounded-xl bg-surface-900/80 border border-white/10 px-4 py-3 text-surface-100 placeholder-surface-200/25 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500/30 transition-all"
+                rows={4}
+                placeholder="e.g., Explain the Pythagorean theorem for middle schoolers with visual examples..."
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && e.metaKey) handleGenerate();
+                }}
+              />
 
-                  {error && (
-                    <div className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-                      {error}
-                    </div>
-                  )}
-
-                  <button
-                    className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-purple-600 py-3 text-base font-semibold text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
-                    onClick={handleGenerate}
-                    disabled={loading || !prompt.trim()}
-                  >
-                    {loading ? (
-                      <>
-                        <div className="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                        Generating Storyboard...
-                      </>
-                    ) : (
-                      <>
-                        <SparklesIcon className="h-5 w-5" />
-                        Generate Storyboard
-                      </>
-                    )}
-                  </button>
-
-                  <p className="mt-3 text-center text-xs text-slate-500">Press ⌘+Enter to generate</p>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div>
-              {/* Storyboard Header */}
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">{getStatusBadge(storyboard.status)}</div>
-                  <h1 className="mt-2 text-2xl font-bold text-white sm:text-3xl">{storyboard.title}</h1>
-                  <p className="mt-2 text-slate-400">{storyboard.description}</p>
-                </div>
-                <button
-                  className="shrink-0 rounded-lg bg-transparent p-2 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white"
-                  onClick={() => refreshStoryboard(storyboard.id)}
-                  title="Refresh"
-                >
-                  <ArrowPathIcon className="h-5 w-5" />
-                </button>
-              </div>
-
-              {/* Progress */}
-              <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <span className="text-sm font-medium text-slate-300">Scene Progress</span>
-                  <span className="text-sm text-slate-400">{completedScenes} / {totalScenes} completed</span>
-                </div>
-                <ProgressBar
-                  value={progress}
-                  status={storyboard.status === 'completed' ? 'completed' : progress === 100 ? 'idle' : 'processing'}
-                  showPercentage={false}
-                  size="md"
-                />
-              </div>
-
-              {/* Final Video */}
-              {(allScenesCompleted || storyboard.finalVideoUrl) && (
-                <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                  <h2 className="mb-4 text-lg font-semibold text-white">
-                    {storyboard.finalVideoUrl ? '🎬 Final Video' : '🎬 Ready to Render'}
-                  </h2>
-
-                  {storyboard.finalVideoUrl ? (
-                    <div className="space-y-4">
-                      <VideoPlayer src={storyboard.finalVideoUrl} title={storyboard.title} duration={storyboard.totalDuration} />
-                      <button
-                        className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-semibold text-white transition-colors hover:bg-emerald-700"
-                        onClick={handleDownload}
-                      >
-                        <ArrowDownTrayIcon className="h-5 w-5" />
-                        Download Video
-                      </button>
-                    </div>
-                  ) : (
-                    <div>
-                      <p className="mb-4 text-sm text-slate-400">All scenes are ready! Click below to assemble the final video.</p>
-                      <button
-                        className="flex w-full items-center justify-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 font-semibold text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
-                        onClick={handleStoryboardRender}
-                        disabled={rendering}
-                      >
-                        {rendering ? (
-                          <>
-                            <div className="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                            Assembling Video...
-                          </>
-                        ) : (
-                          <>
-                            <VideoCameraIcon className="h-5 w-5" />
-                            Assemble Final Video
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Error */}
               {error && (
-                <div className="mt-6 rounded-xl border border-red-500/20 bg-red-500/10 p-4">
-                  <p className="text-sm text-red-400">{error}</p>
+                <div className="rounded-xl border border-accent-rose/20 bg-accent-rose/10 px-4 py-2.5 text-sm text-accent-rose">
+                  {error}
                 </div>
               )}
 
-              {/* Scenes */}
-              <div className="mt-8">
-                <h2 className="mb-4 text-lg font-semibold text-white">Scenes ({totalScenes})</h2>
-                <div className="grid gap-4 md:grid-cols-2">
-                  {storyboard.scenes.map((scene: Scene) => (
-                    <SceneEditor key={scene.id} scene={scene} onSave={handleSceneSave} onProcess={handleSceneProcess} />
+              <button
+                className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-500 to-brand-600 py-3.5 text-base font-semibold text-white hover:from-brand-600 hover:to-brand-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-lg shadow-brand-500/20"
+                onClick={handleGenerate}
+                disabled={loading || !prompt.trim()}
+              >
+                {loading ? (
+                  <>
+                    <ArrowPathIcon className="w-5 h-5 animate-spin" />
+                    Generating Storyboard...
+                  </>
+                ) : (
+                  <>
+                    <SparklesIcon className="w-5 h-5" />
+                    Generate Video
+                  </>
+                )}
+              </button>
+
+              <button
+                className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 py-2.5 text-sm font-medium text-surface-200/60 hover:bg-white/10 hover:text-surface-200/80 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                onClick={handleTestGenerate}
+                disabled={loading}
+              >
+                🧪 Test Pipeline (No AI)
+              </button>
+
+              <p className="text-center text-[11px] text-surface-200/25">
+                Press ⌘+Enter to generate
+              </p>
+            </div>
+
+            {/* Recent projects */}
+            {storyboards.length > 0 && (
+              <div className="space-y-3">
+                <h3 className="text-xs font-semibold text-surface-200/40 uppercase tracking-wider">
+                  Recent Projects
+                </h3>
+                <div className="grid gap-2">
+                  {storyboards.slice(0, 5).map((sb) => (
+                    <button
+                      key={sb.id}
+                      onClick={() => handleSelectStoryboard(sb)}
+                      className="glass-light rounded-xl p-4 text-left hover:bg-white/5 transition-all group"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium text-surface-200/80 group-hover:text-surface-100 transition-colors truncate">
+                          {sb.title || 'Untitled'}
+                        </span>
+                        <span className="text-[10px] text-surface-200/30">
+                          {sb.scenes?.length || 0} scenes
+                        </span>
+                      </div>
+                    </button>
                   ))}
                 </div>
               </div>
+            )}
+          </div>
+        </main>
+      ) : (
+        /* ====================== WORKSPACE ====================== */
+        <main className="flex-1 flex gap-4 p-4 overflow-hidden">
+          {/* Left sidebar */}
+          <Sidebar
+            storyboards={storyboards}
+            selectedStoryboard={storyboard}
+            selectedScene={selectedScene}
+            onSelectStoryboard={handleSelectStoryboard}
+            onSelectScene={setSelectedScene}
+            onNewStoryboard={handleNewStoryboard}
+          />
 
-              {/* Back Button */}
-              <div className="mt-8 border-t border-slate-800 pt-6">
+          {/* Main content area */}
+          <div className="flex-1 overflow-y-auto space-y-4 min-w-0">
+            {/* Storyboard header */}
+            <div className="glass-light rounded-2xl p-5">
+              <div className="flex items-start justify-between">
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-xl font-bold text-surface-100 truncate">
+                    {storyboard.title}
+                  </h2>
+                  <p className="text-sm text-surface-200/50 mt-1 line-clamp-2">
+                    {storyboard.description}
+                  </p>
+                </div>
                 <button
-                  className="rounded-lg bg-transparent px-3 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-white"
-                  onClick={handleNewStoryboard}
+                  onClick={() => refreshStoryboard(storyboard.id)}
+                  className="p-2 rounded-lg text-surface-200/40 hover:text-surface-200/80 hover:bg-white/5 transition-colors shrink-0"
+                  title="Refresh"
                 >
-                  ← Create New Storyboard
+                  <ArrowPathIcon className="w-4 h-4" />
                 </button>
               </div>
+
+              {/* Progress bar (show during processing or if not 100%) */}
+              {(storyboard.status === 'processing' || (progress > 0 && progress < 100)) && (
+                <div className="mt-4">
+                  <ProgressBar
+                    progress={progress}
+                    label={`${completedScenes} / ${totalScenes} scenes complete`}
+                  />
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      </main>
+
+            {/* Error */}
+            {error && (
+              <div className="rounded-xl border border-accent-rose/20 bg-accent-rose/10 px-4 py-3 text-sm text-accent-rose">
+                {error}
+              </div>
+            )}
+
+            {/* Video section — show when ready */}
+            {(allScenesCompleted || storyboard.finalVideoUrl) && (
+              <div className="glass-light rounded-2xl p-5 space-y-4">
+                <h3 className="text-sm font-semibold text-surface-200/70">
+                  {storyboard.finalVideoUrl ? '🎬 Final Video' : '🎬 Ready to Assemble'}
+                </h3>
+
+                {storyboard.finalVideoUrl ? (
+                  <div className="space-y-3">
+                    <VideoPlayer
+                      videoUrl={storyboard.finalVideoUrl}
+                      title={storyboard.title}
+                      className="aspect-video"
+                    />
+                    <button
+                      onClick={handleDownload}
+                      className="w-full flex items-center justify-center gap-2 rounded-xl bg-accent-green/15 border border-accent-green/20 py-2.5 text-sm font-medium text-accent-green hover:bg-accent-green/20 transition-colors"
+                    >
+                      <ArrowDownTrayIcon className="w-4 h-4" />
+                      Download Video
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-xs text-surface-200/40">
+                      All scenes are ready. Click below to assemble the final video.
+                    </p>
+                    <button
+                      onClick={handleStoryboardRender}
+                      disabled={rendering}
+                      className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-500 to-brand-600 py-2.5 text-sm font-medium text-white hover:from-brand-600 hover:to-brand-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-lg shadow-brand-500/20"
+                    >
+                      {rendering ? (
+                        <>
+                          <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                          Assembling...
+                        </>
+                      ) : (
+                        <>
+                          <VideoCameraIcon className="w-4 h-4" />
+                          Assemble Final Video
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Scene detail editor — show when a scene is selected */}
+            {selectedScene && (
+              <SceneEditor
+                scene={selectedScene}
+                onProcess={handleSceneProcess}
+                onSave={handleSceneSave}
+                isLoading={loading}
+              />
+            )}
+
+            {/* Scene video preview */}
+            {selectedScene?.videoUrl && (
+              <div className="glass-light rounded-2xl p-5 space-y-3">
+                <h3 className="text-sm font-semibold text-surface-200/70">
+                  Scene {selectedScene.sceneNumber} Preview
+                </h3>
+                <VideoPlayer
+                  videoUrl={selectedScene.videoUrl}
+                  title={`Scene ${selectedScene.sceneNumber}`}
+                  className="aspect-video"
+                />
+              </div>
+            )}
+
+            {/* Back button */}
+            <div className="pt-2 pb-8">
+              <button
+                onClick={handleNewStoryboard}
+                className="text-xs text-surface-200/30 hover:text-surface-200/60 transition-colors"
+              >
+                ← Create New Storyboard
+              </button>
+            </div>
+          </div>
+        </main>
+      )}
     </div>
   );
 }

@@ -1,11 +1,68 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { generateStoryboard } from '../services/gemini';
+import { generateAudio } from '../services/elevenlabs';
+import { triggerRenderer, assembleVideo } from '../services/renderer';
+import { processStoryboardScenes } from '../services/orchestrator';
 import { validateRequest } from '../middleware/validation';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { z } from 'zod';
 
 const router = Router();
+
+// ==========================================
+// HELPER: Process all scenes automatically
+// ==========================================
+
+/**
+ * Process all scenes using the orchestrator pipeline.
+ * Generates Manim code via AI, renders, auto-corrects errors, and generates TTS.
+ */
+async function processAllScenes(storyboardId: string): Promise<void> {
+  console.log(`🎬 Starting orchestrated pipeline for storyboard: ${storyboardId}`);
+
+  const result = await processStoryboardScenes(storyboardId);
+
+  // After orchestration, assemble final video from completed scenes
+  if (result.completedScenes > 0) {
+    try {
+      const completedScenes = await prisma.scene.findMany({
+        where: { storyboardId, status: 'completed', videoUrl: { not: null } },
+        orderBy: { sceneNumber: 'asc' },
+      });
+
+      if (completedScenes.length > 0) {
+        console.log(`🎞️ Assembling final video from ${completedScenes.length} scenes...`);
+
+        const assemblyResult = await assembleVideo(
+          storyboardId,
+          completedScenes.map(s => ({
+            videoUrl: s.videoUrl!,
+            audioUrl: s.audioUrl || '',
+            duration: s.actualDuration || s.estimatedDuration,
+            sceneNumber: s.sceneNumber,
+          })),
+          'medium'
+        );
+
+        await prisma.storyboard.update({
+          where: { id: storyboardId },
+          data: {
+            finalVideoUrl: assemblyResult.videoUrl,
+            totalDuration: assemblyResult.totalDuration,
+            status: 'completed',
+          },
+        });
+
+        console.log(`🎉 Pipeline complete! Final video: ${assemblyResult.videoUrl}`);
+      }
+    } catch (assemblyError) {
+      console.error('❌ Final video assembly failed:', assemblyError);
+    }
+  } else {
+    console.log('⚠️ No scenes rendered successfully');
+  }
+}
 
 // ==========================================
 // VALIDATION SCHEMAS (Latest Zod)
@@ -16,6 +73,7 @@ const createStoryboardSchema = z.object({
     .min(10, 'Prompt must be at least 10 characters')
     .max(2000, 'Prompt must be less than 2000 characters'),
   userId: z.string().optional(),
+  autoGenerate: z.boolean().optional().default(false),
 });
 
 const updateStoryboardSchema = z.object({
@@ -35,6 +93,74 @@ const listQuerySchema = z.object({
 // ==========================================
 // ROUTES
 // ==========================================
+
+/**
+ * POST /api/storyboard/test
+ * Create a mock storyboard without calling Gemini API (for testing)
+ */
+router.post(
+  '/test',
+  asyncHandler(async (req: Request, res: Response) => {
+    console.log('🧪 Creating test storyboard (no AI)...');
+
+    // Mock storyboard data
+    const mockStoryboard = {
+      title: 'Test Video: Bubble Sort',
+      description: 'A simple test animation to verify the rendering pipeline',
+      scenes: [
+        {
+          narration: 'This is a test scene to verify the video rendering works correctly.',
+          visualDescription: 'A simple animation with text and shapes',
+          manimOperations: [
+            'Text("Cognito Stream Test", color=BLUE).scale(1.5)',
+            'Circle(radius=1, color=GREEN).shift(DOWN * 2)',
+          ],
+          estimatedDuration: 5,
+        },
+      ],
+    };
+
+    const storyboard = await prisma.$transaction(async (tx) => {
+      const newStoryboard = await tx.storyboard.create({
+        data: {
+          title: mockStoryboard.title,
+          description: mockStoryboard.description,
+          prompt: 'TEST: bubble sort explanation',
+          status: 'draft',
+          scenes: {
+            create: mockStoryboard.scenes.map((scene, index) => ({
+              sceneNumber: index + 1,
+              narration: scene.narration,
+              visualDescription: scene.visualDescription,
+              manimCode: JSON.stringify(scene.manimOperations),
+              estimatedDuration: scene.estimatedDuration,
+              status: 'pending',
+            })),
+          },
+        },
+        include: {
+          scenes: { orderBy: { sceneNumber: 'asc' } },
+        },
+      });
+
+      return newStoryboard;
+    });
+
+    // Start auto-processing
+    console.log('🚀 Auto-processing test storyboard...');
+    processAllScenes(storyboard.id).catch(err => {
+      console.error('❌ Test auto-generation failed:', err.message);
+    });
+
+    res.status(201).json({
+      ...storyboard,
+      scenes: storyboard.scenes.map(scene => ({
+        ...scene,
+        manimCode: JSON.parse(scene.manimCode || '[]'),
+      })),
+    });
+  })
+);
 
 /**
  * POST /api/storyboard
@@ -86,13 +212,27 @@ router.post(
       });
     });
 
-    res.status(201).json({
+    // Parse scenes for response
+    const responseData = {
       ...storyboard,
       scenes: storyboard.scenes.map(scene => ({
         ...scene,
         manimCode: JSON.parse(scene.manimCode || '{}'),
       })),
-    });
+    };
+
+    // If autoGenerate is requested, start background processing
+    const { autoGenerate } = req.body;
+    if (autoGenerate) {
+      console.log('🚀 Auto-generation enabled - processing all scenes...');
+
+      // Process in background (don't await)
+      processAllScenes(storyboard.id).catch(err => {
+        console.error('❌ Auto-generation failed:', err.message);
+      });
+    }
+
+    res.status(201).json(responseData);
   })
 );
 
@@ -238,7 +378,7 @@ router.get(
       progress: Math.round(
         (storyboard.scenes.filter(s => s.status === 'completed').length /
           storyboard.scenes.length) *
-          100
+        100
       ),
     };
 
