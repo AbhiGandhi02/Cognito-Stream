@@ -32,108 +32,6 @@ interface StoryboardResponse {
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
-const SYSTEM_PROMPT = `You are an expert educational video script writer and Manim animator.
-
-Your task is to convert user prompts into detailed, structured storyboards for animated educational videos.
-
-IMPORTANT GUIDELINES:
-
-1. **Scene Structure**: Create 3-8 scenes for a complete educational video
-2. **Narration**: Write clear, engaging narration (50-150 words per scene)
-3. **Visual Description**: Describe what viewers will see
-4. **Manim Operations**: Provide valid Python Manim code snippets
-
-MANIM CODE REQUIREMENTS:
-- Use ONLY these safe, whitelisted operations:
-  * Text objects: Text("content").scale(size)
-  * Math: MathTex("equation").scale(size)
-  * Shapes: Circle(), Square(), Rectangle(), Triangle(), Dot()
-  * Lines: Line(start, end), Arrow(start, end)
-  * Groups: VGroup(obj1, obj2).arrange(direction)
-  * Colors: RED, BLUE, GREEN, YELLOW, PURPLE, ORANGE, WHITE
-  * Positioning: .shift(LEFT), .shift(RIGHT*2), .move_to(ORIGIN)
-  * Styling: .set_fill(color, opacity), .set_stroke(color, width)
-
-- Each operation should be a complete, valid Manim object creation
-- Keep operations simple and executable
-- Avoid complex animations or transformations
-- Focus on creating clear, educational visuals
-
-DURATION GUIDELINES:
-- Keep scenes between 3-7 seconds each
-- Match duration to narration length
-- Allow time for viewers to absorb visuals
-
-EDUCATIONAL FOCUS:
-- Break complex topics into digestible chunks
-- Use analogies and examples
-- Build concepts progressively
-- Include visual reinforcement
-
-Example Manim operations:
-- "Text('Welcome to Physics').scale(1.5).shift(UP)"
-- "MathTex('E = mc^2').scale(2)"
-- "Circle().set_fill(BLUE, opacity=0.5).shift(LEFT)"
-- "VGroup(Text('Input'), Arrow(LEFT, RIGHT), Text('Output')).arrange(RIGHT)"`;
-
-// ==========================================
-// RESPONSE SCHEMA
-// ==========================================
-
-const responseSchema = {
-  type: 'object',
-  properties: {
-    title: {
-      type: 'string',
-      description: 'Engaging title for the educational video',
-    },
-    description: {
-      type: 'string',
-      description: 'Brief description of what the video covers',
-    },
-    scenes: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          id: {
-            type: 'string',
-            description: 'Unique identifier (use scene-1, scene-2, etc.)',
-          },
-          narration: {
-            type: 'string',
-            description: 'What will be spoken in this scene',
-          },
-          visualDescription: {
-            type: 'string',
-            description: 'Description of visual elements',
-          },
-          manimOperations: {
-            type: 'array',
-            items: {
-              type: 'string',
-              description: 'Valid Manim Python code snippet',
-            },
-            description: 'Array of Manim code operations',
-          },
-          estimatedDuration: {
-            type: 'number',
-            description: 'Duration in seconds (3-7 seconds)',
-          },
-        },
-        required: [
-          'id',
-          'narration',
-          'visualDescription',
-          'manimOperations',
-          'estimatedDuration',
-        ],
-      },
-    },
-  },
-  required: ['title', 'description', 'scenes'],
-};
-
 // ==========================================
 // MAIN FUNCTION
 // ==========================================
@@ -145,13 +43,28 @@ export async function generateStoryboard(
   console.log('🤖 Generating storyboard with Gemini AI...');
   console.log(`📝 Prompt: "${prompt.substring(0, 100)}..."`);
 
+  // SculptAI-style storyboard prompt: asks for raw JSON array with scene_title/narration/visual_description
+  const promptForStoryboard = `
+You are an expert instructional designer and scriptwriter.
+Your task is to take the user's idea and generate a detailed, step-by-step explanatory script.
+This script should be broken down into logical scenes. For each scene, provide:
+1. A short "scene_title".
+2. The "narration" script for that scene.
+3. A brief "visual_description" of what should be animated or shown.
+Focus on a logical flow that builds understanding.
+Output MUST be a valid JSON array of objects, where each object represents a scene and has keys: "scene_title", "narration", "visual_description".
+Do not include any text outside of this JSON array, no markdown formatting (like \`\`\`json), just the raw JSON array itself.
+
+User Idea: "${prompt}"
+
+JSON Storyboard Output:
+  `;
+
   const model = genAI.getGenerativeModel({
     model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     generationConfig: {
-      responseMimeType: 'application/json',
-      responseSchema: responseSchema as any,
-      temperature: 0.7,
-      maxOutputTokens: 8192, // Increased to prevent truncation
+      temperature: 0.5,
+      maxOutputTokens: 4096,
     },
   });
 
@@ -162,19 +75,48 @@ export async function generateStoryboard(
       console.log(`🔄 Attempt ${attempt}/${maxRetries}`);
 
       const result = await model.generateContent([
-        { text: SYSTEM_PROMPT },
-        { text: `Create a detailed storyboard for: "${prompt}"` },
+        { text: promptForStoryboard },
       ]);
 
-      const response = result.response.text();
+      const responseText = result.response.text()?.trim();
 
-      if (!response) {
+      if (!responseText) {
         throw new Error('Empty response from Gemini');
       }
 
-      const storyboard = JSON.parse(response) as StoryboardResponse;
+      console.log('📄 Raw Gemini response:', responseText.substring(0, 200));
 
-      // Validate the response
+      // Parse JSON — handle both raw JSON and markdown-fenced JSON
+      let parsedStoryboard: any;
+      try {
+        const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
+        parsedStoryboard = jsonMatch && jsonMatch[1] ? JSON.parse(jsonMatch[1]) : JSON.parse(responseText);
+      } catch (parseError) {
+        console.error('❌ JSON parse error:', parseError);
+        throw new Error('Failed to parse storyboard JSON from Gemini. Ensure valid JSON output.');
+      }
+
+      // Handle various response shapes (array, or object with .storyboard/.scenes)
+      const scenesArray = parsedStoryboard.storyboard || parsedStoryboard.scenes || parsedStoryboard;
+
+      if (!Array.isArray(scenesArray) || scenesArray.length === 0) {
+        throw new Error('Gemini did not return a valid storyboard array.');
+      }
+
+      // Map SculptAI scene format to Cognito-Stream format
+      const storyboard: StoryboardResponse = {
+        title: prompt.substring(0, 80),
+        description: `Educational animation about: ${prompt}`,
+        scenes: scenesArray.map((scene: any, index: number) => ({
+          id: `scene-${index + 1}`,
+          narration: scene.narration || '',
+          visualDescription: scene.visual_description || scene.visualDescription || '',
+          manimOperations: [], // Will be generated separately via generateManimSceneCode
+          estimatedDuration: 5,
+        })),
+      };
+
+      // Validate the mapped response
       validateStoryboard(storyboard);
 
       console.log(`✅ Generated ${storyboard.scenes.length} scenes`);
@@ -187,7 +129,7 @@ export async function generateStoryboard(
       console.error(`❌ Attempt ${attempt} failed:`, error);
 
       if (attempt < maxRetries) {
-        const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
+        const delay = Math.pow(2, attempt) * 1000;
         console.log(`⏳ Waiting ${delay}ms before retry...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
@@ -245,45 +187,6 @@ function validateStoryboard(storyboard: any): void {
     if (!scene.visualDescription || typeof scene.visualDescription !== 'string') {
       throw new Error(`Scene ${index}: missing or invalid visualDescription`);
     }
-
-    if (!Array.isArray(scene.manimOperations)) {
-      throw new Error(`Scene ${index}: manimOperations must be an array`);
-    }
-
-    if (scene.manimOperations.length === 0) {
-      throw new Error(`Scene ${index}: no Manim operations provided`);
-    }
-
-    // Validate each Manim operation
-    scene.manimOperations.forEach((op: any, opIndex: number) => {
-      if (typeof op !== 'string') {
-        throw new Error(
-          `Scene ${index}, Operation ${opIndex}: must be a string`
-        );
-      }
-
-      // Basic safety check - ensure no dangerous operations
-      const dangerousPatterns = [
-        'import',
-        'exec',
-        'eval',
-        'open(',
-        'file',
-        '__',
-        'system',
-        'subprocess',
-        'os.',
-      ];
-
-      const lowerOp = op.toLowerCase();
-      for (const pattern of dangerousPatterns) {
-        if (lowerOp.includes(pattern)) {
-          throw new Error(
-            `Scene ${index}, Operation ${opIndex}: contains dangerous pattern "${pattern}"`
-          );
-        }
-      }
-    });
 
     if (
       typeof scene.estimatedDuration !== 'number' ||
