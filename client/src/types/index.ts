@@ -7,26 +7,29 @@
 // ENUMS
 // ==========================================
 
-export enum StoryboardStatus {
-  DRAFT = 'draft',
-  PROCESSING = 'processing',
-  COMPLETED = 'completed',
-  FAILED = 'failed',
-}
+export const StoryboardStatus = {
+  DRAFT: 'draft',
+  PROCESSING: 'processing',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+} as const;
+export type StoryboardStatus = (typeof StoryboardStatus)[keyof typeof StoryboardStatus];
 
-export enum SceneStatus {
-  PENDING = 'pending',
-  PROCESSING = 'processing',
-  COMPLETED = 'completed',
-  FAILED = 'failed',
-}
+export const SceneStatus = {
+  PENDING: 'pending',
+  PROCESSING: 'processing',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+} as const;
+export type SceneStatus = (typeof SceneStatus)[keyof typeof SceneStatus];
 
-export enum RenderQuality {
-  LOW = 'low',
-  MEDIUM = 'medium',
-  HIGH = 'high',
-  ULTRA = 'ultra',
-}
+export const RenderQuality = {
+  LOW: 'low',
+  MEDIUM: 'medium',
+  HIGH: 'high',
+  ULTRA: 'ultra',
+} as const;
+export type RenderQuality = (typeof RenderQuality)[keyof typeof RenderQuality];
 
 // ==========================================
 // CORE ENTITIES
@@ -242,16 +245,17 @@ export interface AssembleVideoResponse {
 // WEBSOCKET EVENT TYPES
 // ==========================================
 
-export enum WebSocketEventType {
-  SCENE_PROCESSING_STARTED = 'scene:processing:started',
-  SCENE_PROCESSING_PROGRESS = 'scene:processing:progress',
-  SCENE_PROCESSING_COMPLETED = 'scene:processing:completed',
-  SCENE_PROCESSING_FAILED = 'scene:processing:failed',
-  STORYBOARD_RENDERING_STARTED = 'storyboard:rendering:started',
-  STORYBOARD_RENDERING_PROGRESS = 'storyboard:rendering:progress',
-  STORYBOARD_RENDERING_COMPLETED = 'storyboard:rendering:completed',
-  STORYBOARD_RENDERING_FAILED = 'storyboard:rendering:failed',
-}
+export const WebSocketEventType = {
+  SCENE_PROCESSING_STARTED: 'scene:processing:started',
+  SCENE_PROCESSING_PROGRESS: 'scene:processing:progress',
+  SCENE_PROCESSING_COMPLETED: 'scene:processing:completed',
+  SCENE_PROCESSING_FAILED: 'scene:processing:failed',
+  STORYBOARD_RENDERING_STARTED: 'storyboard:rendering:started',
+  STORYBOARD_RENDERING_PROGRESS: 'storyboard:rendering:progress',
+  STORYBOARD_RENDERING_COMPLETED: 'storyboard:rendering:completed',
+  STORYBOARD_RENDERING_FAILED: 'storyboard:rendering:failed',
+} as const;
+export type WebSocketEventType = (typeof WebSocketEventType)[keyof typeof WebSocketEventType];
 
 export interface WebSocketEvent {
   type: WebSocketEventType;
@@ -292,28 +296,33 @@ export interface APIError {
   timestamp: Date;
 }
 
-export enum ErrorCode {
-  VALIDATION_ERROR = 'VALIDATION_ERROR',
-  AUTHENTICATION_ERROR = 'AUTHENTICATION_ERROR',
-  AUTHORIZATION_ERROR = 'AUTHORIZATION_ERROR',
-  NOT_FOUND = 'NOT_FOUND',
-  RATE_LIMIT_EXCEEDED = 'RATE_LIMIT_EXCEEDED',
-  GEMINI_API_ERROR = 'GEMINI_API_ERROR',
-  ELEVENLABS_API_ERROR = 'ELEVENLABS_API_ERROR',
-  RENDERER_ERROR = 'RENDERER_ERROR',
-  DATABASE_ERROR = 'DATABASE_ERROR',
-  STORAGE_ERROR = 'STORAGE_ERROR',
-  INTERNAL_SERVER_ERROR = 'INTERNAL_SERVER_ERROR',
-}
+export const ErrorCode = {
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  AUTHENTICATION_ERROR: 'AUTHENTICATION_ERROR',
+  AUTHORIZATION_ERROR: 'AUTHORIZATION_ERROR',
+  NOT_FOUND: 'NOT_FOUND',
+  RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
+  GEMINI_API_ERROR: 'GEMINI_API_ERROR',
+  ELEVENLABS_API_ERROR: 'ELEVENLABS_API_ERROR',
+  RENDERER_ERROR: 'RENDERER_ERROR',
+  DATABASE_ERROR: 'DATABASE_ERROR',
+  STORAGE_ERROR: 'STORAGE_ERROR',
+  INTERNAL_SERVER_ERROR: 'INTERNAL_SERVER_ERROR',
+} as const;
+export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
 
 export class CognitoStreamError extends Error {
+  code: ErrorCode;
+  details?: any;
   constructor(
-    public code: ErrorCode,
+    code: ErrorCode,
     message: string,
-    public details?: any
+    details?: any
   ) {
     super(message);
     this.name = 'CognitoStreamError';
+    this.code = code;
+    this.details = details;
   }
 }
 
@@ -441,44 +450,3 @@ export function isAPIError(obj: any): obj is APIError {
   );
 }
 
-// ==========================================
-// EXPORT ALL TYPES
-// ==========================================
-
-export type {
-  User,
-  Storyboard,
-  Scene,
-  RenderJob,
-  CreateStoryboardRequest,
-  UpdateStoryboardRequest,
-  StoryboardListQuery,
-  UpdateSceneRequest,
-  ProcessSceneRequest,
-  RenderSceneRequest,
-  AssembleVideoRequest,
-  GeminiStoryboardScene,
-  GeminiStoryboardResponse,
-  GeminiPromptConfig,
-  ElevenLabsVoiceSettings,
-  ElevenLabsTTSRequest,
-  ElevenLabsTTSResponse,
-  ManimOperation,
-  ManimScene,
-  ManimRenderConfig,
-  RendererHealthResponse,
-  RenderSceneResponse,
-  AssembleVideoResponse,
-  WebSocketEvent,
-  SceneProcessingEvent,
-  StoryboardRenderingEvent,
-  APIError,
-  PaginatedResponse,
-  TimeRange,
-  ProgressInfo,
-  StoryboardAnalytics,
-  UserAnalytics,
-  StorageConfig,
-  UploadResult,
-  AppConfig,
-};

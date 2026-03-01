@@ -21,7 +21,7 @@ import { generateAudio } from './elevenlabs';
 // ==========================================
 
 const MAX_CORRECTION_ATTEMPTS = 3;
-const PARALLEL_CONCURRENCY = 2; // Process 2 scenes at a time
+const PARALLEL_CONCURRENCY = 1; // Process 1 scene at a time to respect rate limits
 
 // ==========================================
 // TYPES

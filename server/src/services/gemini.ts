@@ -146,7 +146,7 @@ export async function generateStoryboard(
   console.log(`📝 Prompt: "${prompt.substring(0, 100)}..."`);
 
   const model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite',
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     generationConfig: {
       responseMimeType: 'application/json',
       responseSchema: responseSchema as any,
@@ -383,7 +383,7 @@ export async function generateManimSceneCode(
   console.log(`🎨 Generating Manim code for scene ${params.sceneNumber}: "${params.sceneTitle}"`);
 
   const model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite',
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     generationConfig: {
       temperature: 0.4, // Lower temp for more reliable code
       maxOutputTokens: 4096,
@@ -446,7 +446,7 @@ export async function correctManimCode(
   console.log(`🔧 Correcting Manim code (attempt ${params.attemptNumber})...`);
 
   const model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite',
+    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
     generationConfig: {
       temperature: 0.2, // Very low temp for precise fixes
       maxOutputTokens: 4096,

@@ -4,11 +4,7 @@
  */
 
 import { useRef, useState } from 'react';
-import {
-    PlayCircleIcon,
-    PauseCircleIcon,
-    ArrowsPointingOutIcon,
-} from '@heroicons/react/24/solid';
+import { PlayCircle, PauseCircle, Maximize2 } from 'lucide-react';
 
 interface VideoPlayerProps {
     videoUrl: string | null | undefined;
@@ -39,7 +35,6 @@ export function VideoPlayer({ videoUrl, title, className = '' }: VideoPlayerProp
         }
     };
 
-    // Construct full URL for the video
     const fullVideoUrl = videoUrl
         ? videoUrl.startsWith('http')
             ? videoUrl
@@ -49,10 +44,10 @@ export function VideoPlayer({ videoUrl, title, className = '' }: VideoPlayerProp
     if (!fullVideoUrl) {
         return (
             <div
-                className={`rounded-2xl bg-surface-900/60 border border-white/5 flex flex-col items-center justify-center text-surface-200/30 ${className}`}
+                className={`rounded-2xl bg-navy-900/60 border border-primary-500/5 flex flex-col items-center justify-center text-slate-600 ${className}`}
                 style={{ minHeight: 300 }}
             >
-                <PlayCircleIcon className="w-16 h-16 mb-3 opacity-20" />
+                <PlayCircle className="w-16 h-16 mb-3 opacity-20" />
                 <p className="text-sm">No video available</p>
                 <p className="text-xs mt-1 opacity-50">Generate scenes to preview</p>
             </div>
@@ -60,7 +55,7 @@ export function VideoPlayer({ videoUrl, title, className = '' }: VideoPlayerProp
     }
 
     return (
-        <div className={`rounded-2xl overflow-hidden bg-black/40 border border-white/5 relative group ${className}`}>
+        <div className={`rounded-2xl overflow-hidden bg-black/40 border border-primary-500/5 relative group ${className}`}>
             {/* Title overlay */}
             {title && (
                 <div className="absolute top-0 left-0 right-0 z-10 p-3 bg-gradient-to-b from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
@@ -86,9 +81,9 @@ export function VideoPlayer({ videoUrl, title, className = '' }: VideoPlayerProp
                     className="text-white/90 hover:text-white transition-colors"
                 >
                     {isPlaying ? (
-                        <PauseCircleIcon className="w-8 h-8" />
+                        <PauseCircle className="w-8 h-8" />
                     ) : (
-                        <PlayCircleIcon className="w-8 h-8" />
+                        <PlayCircle className="w-8 h-8" />
                     )}
                 </button>
 
@@ -96,17 +91,17 @@ export function VideoPlayer({ videoUrl, title, className = '' }: VideoPlayerProp
                     onClick={toggleFullscreen}
                     className="text-white/60 hover:text-white transition-colors"
                 >
-                    <ArrowsPointingOutIcon className="w-5 h-5" />
+                    <Maximize2 className="w-5 h-5" />
                 </button>
             </div>
 
-            {/* Click to play overlay (shown when paused) */}
+            {/* Click to play overlay */}
             {!isPlaying && (
                 <button
                     onClick={togglePlay}
-                    className="absolute inset-0 flex items-center justify-center z-5 cursor-pointer bg-transparent"
+                    className="absolute inset-0 flex items-center justify-center z-[5] cursor-pointer bg-transparent"
                 >
-                    <PlayCircleIcon className="w-16 h-16 text-white/50 hover:text-white/80 transition-colors drop-shadow-lg" />
+                    <PlayCircle className="w-16 h-16 text-white/50 hover:text-white/80 transition-colors drop-shadow-lg" />
                 </button>
             )}
         </div>

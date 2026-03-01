@@ -95,8 +95,8 @@ export async function triggerRendererWithCode(
             };
         }
 
-        // Transform renderer's /videos/ path to server's /video/ path
-        const videoUrl = response.data.videoUrl?.replace('/videos/', '/video/') || '';
+        // Keep the renderer's /videos/ path as-is — needed by the /assemble endpoint
+        const videoUrl = response.data.videoUrl || '';
 
         console.log(`✅ Code render complete: ${videoUrl}`);
 
@@ -174,8 +174,8 @@ export async function triggerRenderer(
             throw new Error(response.data.error || 'Rendering failed');
         }
 
-        // Transform renderer's /videos/ path to server's /video/ path
-        const videoUrl = response.data.videoUrl.replace('/videos/', '/video/');
+        // Keep the renderer's /videos/ path as-is
+        const videoUrl = response.data.videoUrl;
 
         console.log(`✅ Render complete: ${videoUrl}`);
 
@@ -241,8 +241,8 @@ export async function assembleVideo(
             throw new Error(response.data.error || 'Video assembly failed');
         }
 
-        // Transform renderer's /videos/ path to server's /video/ path
-        const videoUrl = response.data.videoUrl.replace('/videos/', '/video/');
+        // Keep the renderer's /videos/ path as-is
+        const videoUrl = response.data.videoUrl;
 
         console.log(`✅ Assembly complete: ${videoUrl}`);
 

@@ -73,7 +73,7 @@ const createStoryboardSchema = z.object({
     .min(10, 'Prompt must be at least 10 characters')
     .max(2000, 'Prompt must be less than 2000 characters'),
   userId: z.string().optional(),
-  autoGenerate: z.boolean().optional().default(false),
+  autoGenerate: z.boolean().optional().default(true),
 });
 
 const updateStoryboardSchema = z.object({
@@ -221,16 +221,11 @@ router.post(
       })),
     };
 
-    // If autoGenerate is requested, start background processing
-    const { autoGenerate } = req.body;
-    if (autoGenerate) {
-      console.log('🚀 Auto-generation enabled - processing all scenes...');
-
-      // Process in background (don't await)
-      processAllScenes(storyboard.id).catch(err => {
-        console.error('❌ Auto-generation failed:', err.message);
-      });
-    }
+    // Always auto-process all scenes in background
+    console.log('🚀 Auto-processing all scenes...');
+    processAllScenes(storyboard.id).catch(err => {
+      console.error('❌ Auto-generation failed:', err.message);
+    });
 
     res.status(201).json(responseData);
   })

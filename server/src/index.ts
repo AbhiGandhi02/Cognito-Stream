@@ -11,6 +11,9 @@ const __dirname = path.dirname(__filename);
 // Load environment variables
 dotenv.config();
 
+console.log('🔑 Loaded ElevenLabs Key:', process.env.ELEVENLABS_API_KEY ? `${process.env.ELEVENLABS_API_KEY.substring(0, 10)}...` : 'NONE');
+console.log('🔑 Loaded Voice ID:', process.env.ELEVENLABS_VOICE_ID);
+
 // Import routes
 import storyboardRouter from './routes/storyboard';
 import sceneRouter from './routes/scene';
@@ -54,6 +57,7 @@ app.use('/audio', express.static(audioPath));
 // Serve video files
 const videoPath = path.join(__dirname, '../../storage/output');
 app.use('/video', express.static(videoPath));
+app.use('/videos', express.static(videoPath));
 console.log(`📁 Video files: ${videoPath}`);
 
 // ==========================================

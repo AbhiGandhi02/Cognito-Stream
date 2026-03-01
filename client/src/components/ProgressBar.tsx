@@ -15,13 +15,13 @@ export function ProgressBar({ progress, label, compact = false }: ProgressBarPro
     if (compact) {
         return (
             <div className="flex items-center gap-2">
-                <div className="flex-1 h-1 rounded-full bg-surface-800 overflow-hidden">
+                <div className="flex-1 h-1 rounded-full bg-navy-800 overflow-hidden">
                     <div
-                        className="h-full rounded-full bg-gradient-to-r from-brand-500 to-accent-blue transition-all duration-500 ease-out"
+                        className="h-full rounded-full bg-gradient-to-r from-primary-500 to-info transition-all duration-500 ease-out"
                         style={{ width: `${clamped}%` }}
                     />
                 </div>
-                <span className="text-[10px] text-surface-200/40 font-mono w-8 text-right">
+                <span className="text-[10px] text-slate-600 font-mono w-8 text-right">
                     {Math.round(clamped)}%
                 </span>
             </div>
@@ -31,17 +31,17 @@ export function ProgressBar({ progress, label, compact = false }: ProgressBarPro
     return (
         <div className="glass-light rounded-xl p-4 space-y-2">
             <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-surface-200/60">
+                <span className="text-xs font-medium text-slate-500">
                     {label || 'Processing'}
                 </span>
-                <span className="text-xs font-mono text-brand-300">
+                <span className="text-xs font-mono text-primary-300">
                     {Math.round(clamped)}%
                 </span>
             </div>
 
-            <div className="h-2 rounded-full bg-surface-800/80 overflow-hidden">
+            <div className="h-2 rounded-full bg-navy-800/80 overflow-hidden">
                 <div
-                    className="h-full rounded-full bg-gradient-to-r from-brand-500 via-brand-400 to-accent-blue transition-all duration-700 ease-out relative"
+                    className="h-full rounded-full bg-gradient-to-r from-primary-500 via-primary-400 to-info transition-all duration-700 ease-out relative"
                     style={{ width: `${clamped}%` }}
                 >
                     {/* Shimmer effect */}
@@ -50,7 +50,7 @@ export function ProgressBar({ progress, label, compact = false }: ProgressBarPro
             </div>
 
             {clamped < 100 && (
-                <p className="text-[10px] text-surface-200/30">
+                <p className="text-[10px] text-slate-700">
                     Generating scenes, rendering, and processing audio...
                 </p>
             )}
