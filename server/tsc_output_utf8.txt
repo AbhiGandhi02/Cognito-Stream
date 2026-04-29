@@ -1,0 +1,4 @@
+﻿src/middleware/auth.ts(9,17): error TS7030: Not all code paths return a value.
+src/middleware/errorHandler.ts(9,17): error TS7030: Not all code paths return a value.
+src/middleware/validation.ts(11,10): error TS7030: Not all code paths return a value.
+src/middleware/validation.ts(33,10): error TS7030: Not all code paths return a value.

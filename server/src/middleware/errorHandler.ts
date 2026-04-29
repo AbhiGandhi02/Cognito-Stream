@@ -57,7 +57,7 @@ export function errorHandler(
   }
 
   // Default error
-  res.status(500).json({
+  return res.status(500).json({
     error: 'Internal Server Error',
     message: process.env.NODE_ENV === 'production' 
       ? 'An unexpected error occurred' 

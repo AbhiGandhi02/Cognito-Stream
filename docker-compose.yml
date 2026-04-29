@@ -7,20 +7,23 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      # Persistent storage - all in ./storage folder
+      # Persistent storage
       - ./storage/output:/app/output
       - ./storage/temp:/app/temp
       - ./storage/audio:/app/audio
+      # Mount source code for hot-reload (no rebuild needed on code changes)
+      - ./renderer/app.py:/app/app.py
+      - ./renderer/utils:/app/utils
     environment:
       - PORT=5000
       - OUTPUT_DIR=/app/output
       - TEMP_DIR=/app/temp
       - AUDIO_DIR=/app/audio
-      - DEBUG=false
-      - FLASK_ENV=production
+      - DEBUG=true
+      - FLASK_ENV=development
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:5000/health" ]
       interval: 30s
       timeout: 10s
       retries: 3

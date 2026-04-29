@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ffprobe -v error -show_streams -of json c:/Users/abhig/Documents/Cognito-Stream/storage/output/cmojuga3s0001gvm0vjke0phc_final.mp4)",
+      "Bash(ffprobe -v error -show_streams -of json c:/Users/abhig/Documents/Cognito-Stream/storage/audio/cmojuga3s0002gvm0ogji9v6h.mp3)",
+      "Bash(npx tsc *)"
+    ]
+  }
+}

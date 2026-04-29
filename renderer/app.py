@@ -1,10 +1,13 @@
 from flask import Flask, request, jsonify, send_from_directory
 from manim import *
+from manim import RegularPolygon
 import subprocess
 import os
 import json
 import tempfile
 import shutil
+import urllib.request
+import wave
 from pathlib import Path
 import logging
 import traceback
@@ -26,11 +29,31 @@ logger = logging.getLogger(__name__)
 OUTPUT_DIR = Path(os.getenv('OUTPUT_DIR', '/app/output'))
 TEMP_DIR = Path(os.getenv('TEMP_DIR', '/app/temp'))
 AUDIO_DIR = Path(os.getenv('AUDIO_DIR', '/app/audio'))
+VOICES_DIR = Path(os.getenv('VOICES_DIR', '/app/voices'))
 
 # Create directories
 OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 TEMP_DIR.mkdir(exist_ok=True, parents=True)
 AUDIO_DIR.mkdir(exist_ok=True, parents=True)
+VOICES_DIR.mkdir(exist_ok=True, parents=True)
+
+# Default render quality. 'low' = 854x480@24fps (~3x faster than 'medium').
+# Override via DEFAULT_RENDER_QUALITY env or by passing 'quality' in the request body.
+DEFAULT_RENDER_QUALITY = os.getenv('DEFAULT_RENDER_QUALITY', 'low')
+
+# Piper TTS voice — auto-downloaded on first request if not pre-baked into image.
+# Voice name format: <locale>-<speaker>-<quality>, e.g. en_GB-jenny_dioco-medium.
+# Browse voices: https://huggingface.co/rhasspy/piper-voices/tree/main
+PIPER_VOICE = os.getenv('PIPER_VOICE', 'en_GB-jenny_dioco-medium')
+
+def piper_voice_url(voice_name, filename):
+    """Build the HuggingFace download URL for a Piper voice asset."""
+    locale, speaker, quality = voice_name.split('-')
+    lang = locale.split('_')[0]
+    return (
+        f'https://huggingface.co/rhasspy/piper-voices/resolve/main/'
+        f'{lang}/{locale}/{speaker}/{quality}/{filename}'
+    )
 
 # Quality presets
 QUALITY_PRESETS = {
@@ -250,7 +273,6 @@ def render_scene_with_manim(scene_file, scene_id, quality='medium'):
         '--media_dir', str(OUTPUT_DIR),
         '-o', f'{scene_id}.mp4',
         '--disable_caching',
-        '--flush_cache',
         '--progress_bar', 'none'
     ]
     
@@ -422,6 +444,71 @@ def get_video_duration(video_path):
         return 0.0
 
 # ==========================================
+# PIPER TTS
+# ==========================================
+
+_piper_voice_cache = None  # Lazily loaded PiperVoice instance
+
+def ensure_voice_model():
+    """Download Piper voice model files if missing. Returns the .onnx path."""
+    onnx_path = VOICES_DIR / f'{PIPER_VOICE}.onnx'
+    json_path = VOICES_DIR / f'{PIPER_VOICE}.onnx.json'
+
+    if not onnx_path.exists():
+        logger.info(f"⬇️  Downloading Piper voice model: {PIPER_VOICE}.onnx (~30-100 MB)")
+        urllib.request.urlretrieve(
+            piper_voice_url(PIPER_VOICE, f'{PIPER_VOICE}.onnx'), onnx_path
+        )
+    if not json_path.exists():
+        logger.info(f"⬇️  Downloading Piper voice config: {PIPER_VOICE}.onnx.json")
+        urllib.request.urlretrieve(
+            piper_voice_url(PIPER_VOICE, f'{PIPER_VOICE}.onnx.json'), json_path
+        )
+
+    return onnx_path
+
+def get_piper_voice():
+    """Load (and cache) the PiperVoice instance."""
+    global _piper_voice_cache
+    if _piper_voice_cache is None:
+        from piper import PiperVoice
+        onnx_path = ensure_voice_model()
+        logger.info(f"🎤 Loading Piper voice: {onnx_path}")
+        _piper_voice_cache = PiperVoice.load(str(onnx_path))
+    return _piper_voice_cache
+
+def synthesize_to_mp3(text, output_mp3):
+    """Synthesize text → WAV via Piper, then convert to MP3 via FFmpeg."""
+    voice = get_piper_voice()
+
+    wav_path = TEMP_DIR / f'tts_{int(time.time() * 1000)}.wav'
+    try:
+        with wave.open(str(wav_path), 'wb') as wav_file:
+            voice.synthesize(text, wav_file)
+
+        # Convert WAV → MP3
+        result = subprocess.run(
+            [
+                'ffmpeg', '-y',
+                '-i', str(wav_path),
+                '-codec:a', 'libmp3lame',
+                '-qscale:a', '2',
+                str(output_mp3),
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode('utf-8', errors='replace')
+            raise Exception(f"FFmpeg WAV→MP3 failed: {stderr[:300]}")
+    finally:
+        if wav_path.exists():
+            try:
+                wav_path.unlink()
+            except Exception:
+                pass
+
+# ==========================================
 # ROUTES
 # ==========================================
 
@@ -458,7 +545,7 @@ def render_scene():
         scene_id = data.get('sceneId')
         manim_code = data.get('manimCode')
         duration = data.get('duration', 5.0)
-        quality = data.get('quality', 'medium')
+        quality = data.get('quality', DEFAULT_RENDER_QUALITY)
         
         if not scene_id or not manim_code:
             return jsonify({
@@ -600,7 +687,7 @@ def render_full_code():
         data = request.json
         scene_id = data.get('sceneId')
         manim_code = data.get('manimCode')
-        quality = data.get('quality', 'medium')
+        quality = data.get('quality', DEFAULT_RENDER_QUALITY)
         
         if not scene_id or not manim_code:
             return jsonify({
@@ -678,7 +765,7 @@ def render_full_code():
             '--media_dir', str(job_dir / 'media'),
             '-o', f'{scene_id}.mp4',
             '--disable_caching',
-            '--progress_bar', 'none'
+            '--progress_bar', 'none',
         ]
         
         logger.info(f"Executing: {' '.join(cmd)}")
@@ -779,13 +866,13 @@ def render_full_code():
 
 @app.route('/assemble', methods=['POST'])
 def assemble_video():
-    """Assemble multiple scenes into final video"""
+    """Assemble multiple scenes into final video, stitching audio per scene"""
     
     try:
         data = request.json
         storyboard_id = data.get('storyboardId')
         scenes = data.get('scenes', [])
-        quality = data.get('quality', 'medium')
+        quality = data.get('quality', DEFAULT_RENDER_QUALITY)
         
         if not storyboard_id or not scenes:
             return jsonify({
@@ -796,12 +883,12 @@ def assemble_video():
         logger.info(f"🎞️  Assembling video for: {storyboard_id}")
         logger.info(f"Scenes to assemble: {len(scenes)}")
         
-        # Collect video paths
+        # Collect video paths (stitch audio if available)
         video_paths = []
         total_duration = 0
         
         for scene in scenes:
-            # Extract scene ID from URL or use directly
+            # Extract scene video filename from URL
             video_url = scene.get('videoUrl', '')
             if '/videos/' in video_url:
                 filename = video_url.split('/videos/')[-1]
@@ -814,7 +901,29 @@ def assemble_video():
                 logger.warning(f"Video not found: {video_path}")
                 continue
             
-            video_paths.append(video_path)
+            # Check if this scene has audio to stitch
+            audio_url = scene.get('audioUrl', '')
+            if audio_url:
+                try:
+                    # Audio is stored in the shared volume at /app/audio/
+                    audio_filename = audio_url.split('/')[-1] if '/' in audio_url else audio_url
+                    audio_path = AUDIO_DIR / audio_filename
+                    
+                    if audio_path.exists():
+                        # Stitch audio into the video
+                        stitched_path = OUTPUT_DIR / f"{video_path.stem}_with_audio.mp4"
+                        stitch_audio_video(video_path, audio_path, stitched_path)
+                        video_paths.append(stitched_path)
+                        logger.info(f"✓ Stitched audio into scene {scene.get('sceneNumber')}")
+                    else:
+                        logger.warning(f"Audio file not found: {audio_path}, using video without audio")
+                        video_paths.append(video_path)
+                except Exception as stitch_err:
+                    logger.error(f"Audio stitch failed for scene {scene.get('sceneNumber')}: {stitch_err}")
+                    video_paths.append(video_path)  # Fallback: use video without audio
+            else:
+                video_paths.append(video_path)
+            
             total_duration += scene.get('duration', 0)
         
         if not video_paths:
@@ -823,9 +932,17 @@ def assemble_video():
                 'error': 'No valid video files found'
             }), 400
         
-        # Concatenate videos
+        # Concatenate all videos (with audio already stitched)
         output_file = OUTPUT_DIR / f'{storyboard_id}_final.mp4'
         concatenate_videos(video_paths, output_file)
+        
+        # Cleanup temporary stitched files
+        for vpath in video_paths:
+            if '_with_audio' in str(vpath) and vpath.exists():
+                try:
+                    vpath.unlink()
+                except Exception:
+                    pass
         
         # Verify output
         final_duration = get_video_duration(output_file)
@@ -854,6 +971,61 @@ def assemble_video():
 def serve_video(filename):
     """Serve rendered video files"""
     return send_from_directory(OUTPUT_DIR, filename)
+
+@app.route('/audio/<path:filename>')
+def serve_audio(filename):
+    """Serve generated audio files"""
+    return send_from_directory(AUDIO_DIR, filename)
+
+@app.route('/tts', methods=['POST'])
+def text_to_speech():
+    """Generate audio from text using local Piper TTS"""
+
+    try:
+        data = request.json or {}
+        scene_id = data.get('sceneId')
+        text = data.get('text', '').strip()
+
+        if not scene_id or not text:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required fields: sceneId and text'
+            }), 400
+
+        if len(text) > 5000:
+            return jsonify({
+                'success': False,
+                'error': 'Text too long (max 5000 characters)'
+            }), 400
+
+        logger.info(f"🎙️  TTS request: scene={scene_id}, chars={len(text)}")
+
+        start_time = time.time()
+        mp3_path = AUDIO_DIR / f'{scene_id}.mp3'
+
+        synthesize_to_mp3(text, mp3_path)
+
+        duration = get_video_duration(mp3_path)  # ffprobe works on MP3 too
+        elapsed = round(time.time() - start_time, 2)
+
+        logger.info(f"✅ TTS complete: {mp3_path.name} ({duration}s, took {elapsed}s)")
+
+        return jsonify({
+            'success': True,
+            'audioUrl': f'/audio/{scene_id}.mp3',
+            'sceneId': scene_id,
+            'duration': duration,
+            'characterCount': len(text),
+            'synthesisTime': elapsed,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ TTS error: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
@@ -996,8 +1168,11 @@ if __name__ == '__main__':
     logger.info(f"Temp directory: {TEMP_DIR}")
     logger.info("Starting server...")
     
+    is_debug = os.getenv('DEBUG', 'False').lower() == 'true'
+
     app.run(
         host='0.0.0.0',
         port=int(os.getenv('PORT', 5000)),
-        debug=os.getenv('DEBUG', 'False').lower() == 'true'
+        debug=is_debug,
+        use_reloader=False  # Disable reloader — volume mounts handle code updates
     )

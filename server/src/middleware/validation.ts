@@ -11,7 +11,7 @@ export function validateRequest(schema: ZodType<any, any, any>) {
   return (req: Request, res: Response, next: NextFunction) => {
     try {
       req.body = schema.parse(req.body);
-      next();
+      return next();
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({
@@ -23,7 +23,7 @@ export function validateRequest(schema: ZodType<any, any, any>) {
           })),
         });
       }
-      next(error);
+      return next(error);
     }
   };
 }
@@ -33,7 +33,7 @@ export function validateQuery(schema: ZodType<any, any, any>) {
   return (req: Request, res: Response, next: NextFunction) => {
     try {
       req.query = schema.parse(req.query);
-      next();
+      return next();
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({
@@ -45,7 +45,7 @@ export function validateQuery(schema: ZodType<any, any, any>) {
           })),
         });
       }
-      next(error);
+      return next(error);
     }
   };
 }

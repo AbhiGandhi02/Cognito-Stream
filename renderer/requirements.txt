@@ -15,6 +15,9 @@ pillow==9.5.0
 # Audio processing
 pydub==0.25.1
 
+# Text-to-Speech (local, open-source)
+piper-tts==1.2.0
+
 # Production server
 gunicorn==21.2.0
 

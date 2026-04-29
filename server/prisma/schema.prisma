@@ -6,7 +6,6 @@ generator client {
 
 datasource db {
   provider = "postgresql" // Can use "sqlite" for local development
-  url      = env("DATABASE_URL")
 }
 
 model Storyboard {

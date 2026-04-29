@@ -1,3 +1,8 @@
+/**
+ * TTS service — generates audio via the renderer's /tts endpoint
+ * (local Piper TTS, no external API key required).
+ */
+
 import axios from 'axios';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -10,15 +15,17 @@ const execAsync = promisify(exec);
 // TYPES
 // ==========================================
 
-interface ElevenLabsResponse {
+interface TTSResponse {
   audioUrl: string;
   duration: number;
   characterCount: number;
 }
 
+// Accepted for backwards compatibility — Piper exposes its own voice tuning
+// via voice models, so per-call settings are ignored.
 interface VoiceSettings {
-  stability: number;
-  similarity_boost: number;
+  stability?: number;
+  similarity_boost?: number;
   style?: number;
   use_speaker_boost?: boolean;
 }
@@ -27,37 +34,11 @@ interface VoiceSettings {
 // CONFIGURATION
 // ==========================================
 
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY?.trim() || '';
-const VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ErXwobaYiN019PkySvjV';
 const STORAGE_DIR = path.join(process.cwd(), 'storage', 'audio');
-const BASE_URL = 'https://api.elevenlabs.io/v1';
+const TTS_TIMEOUT = 120000; // 2 minutes — Piper is fast but model load can be slow on first call
 
-// Debug: Log API key status on load
-if (ELEVENLABS_API_KEY) {
-  console.log('🔑 ElevenLabs API key loaded');
-} else {
-  console.log('⚠️  No ElevenLabs API key configured');
-}
-
-// Default voice settings for educational content
-const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
-  stability: 0.5,
-  similarity_boost: 0.75,
-  style: 0.3,
-  use_speaker_boost: true,
-};
-
-// ==========================================
-// INITIALIZATION
-// ==========================================
-
-async function ensureStorageDirectory(): Promise<void> {
-  try {
-    await fs.access(STORAGE_DIR);
-  } catch {
-    await fs.mkdir(STORAGE_DIR, { recursive: true });
-    console.log('📁 Created audio storage directory');
-  }
+function getRendererUrl(): string {
+  return process.env.RENDERER_URL || 'http://localhost:5000';
 }
 
 // ==========================================
@@ -67,98 +48,65 @@ async function ensureStorageDirectory(): Promise<void> {
 export async function generateAudio(
   text: string,
   sceneId: string,
-  voiceSettings: VoiceSettings = DEFAULT_VOICE_SETTINGS
-): Promise<ElevenLabsResponse> {
+  _voiceSettings?: VoiceSettings
+): Promise<TTSResponse> {
   console.log(`🎙️  Generating audio for scene: ${sceneId}`);
   console.log(`📝 Text length: ${text.length} characters`);
 
-  // Validate inputs
+  // Validate inputs (preserved from previous behavior — tests rely on these)
   if (!text || text.trim().length === 0) {
     throw new Error('Text cannot be empty');
   }
-
   if (text.length > 5000) {
     throw new Error('Text too long (max 5000 characters)');
   }
 
-  if (!ELEVENLABS_API_KEY) {
-    console.log('⚠️  ElevenLabs API key not configured - skipping audio generation');
-    console.log('💡 To enable audio, add ELEVENLABS_API_KEY to your .env file');
-
-    // Return placeholder values so video can still be generated without audio
-    const estimatedDuration = Math.ceil(text.length / 15); // ~15 chars per second
-    return {
-      audioUrl: '', // Empty string indicates no audio
-      duration: estimatedDuration,
-      characterCount: text.length,
-    };
-  }
-
-  // Ensure storage directory exists
-  await ensureStorageDirectory();
+  const rendererUrl = getRendererUrl();
+  console.log(`📡 POST ${rendererUrl}/tts`);
 
   try {
-    // Make API request to ElevenLabs
     const response = await axios.post(
-      `${BASE_URL}/text-to-speech/${VOICE_ID}`,
+      `${rendererUrl}/tts`,
+      { sceneId, text },
       {
-        text,
-        model_id: 'eleven_monolingual_v1',
-        voice_settings: voiceSettings,
-      },
-      {
-        headers: {
-          Accept: 'audio/mpeg',
-          'xi-api-key': ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json',
-        },
-        responseType: 'arraybuffer',
-        timeout: 60000, // 60 second timeout
+        timeout: TTS_TIMEOUT,
+        headers: { 'Content-Type': 'application/json' },
       }
     );
 
-    // Save audio file
-    const filename = `${sceneId}.mp3`;
-    const filepath = path.join(STORAGE_DIR, filename);
-    await fs.writeFile(filepath, response.data);
+    if (!response.data?.success) {
+      throw new Error(response.data?.error || 'TTS request failed');
+    }
 
-    console.log(`✅ Audio saved: ${filename}`);
-
-    // Get actual audio duration using ffprobe
-    const duration = await getAudioDuration(filepath);
-
-    console.log(`⏱️  Audio duration: ${duration.toFixed(2)}s`);
+    const duration: number = response.data.duration ?? 0;
+    console.log(`✅ Audio saved: ${sceneId}.mp3 (${duration.toFixed(2)}s)`);
 
     return {
-      audioUrl: `/audio/${filename}`,
+      audioUrl: response.data.audioUrl || `/audio/${sceneId}.mp3`,
       duration,
       characterCount: text.length,
     };
   } catch (error) {
-    // Log the error but don't throw - return placeholder so video can still be generated
     let errorMessage = 'Unknown error';
     if (axios.isAxiosError(error)) {
-      const status = error.response?.status;
-      const message = error.response?.data?.detail?.message || error.message;
-
-      if (status === 401) {
-        errorMessage = 'Invalid ElevenLabs API key';
-      } else if (status === 429) {
-        errorMessage = 'ElevenLabs rate limit exceeded';
-      } else if (status === 400) {
-        errorMessage = `Invalid request: ${message}`;
+      if (error.code === 'ECONNREFUSED') {
+        errorMessage = 'Renderer service is not running (cannot reach /tts)';
       } else {
-        errorMessage = `ElevenLabs API error: ${message}`;
+        const status = error.response?.status;
+        const body = error.response?.data;
+        errorMessage = `Renderer /tts HTTP ${status}: ${
+          typeof body === 'string' ? body : JSON.stringify(body)
+        }`;
       }
     } else if (error instanceof Error) {
       errorMessage = error.message;
     }
 
     console.error(`⚠️ Audio generation failed: ${errorMessage}`);
-    console.log('💡 Continuing without audio - video will be generated with estimated duration');
+    console.log('💡 Continuing without audio - video will use estimated duration');
 
-    // Return placeholder with estimated duration so video can still be rendered
-    const estimatedDuration = Math.ceil(text.length / 15); // ~15 chars per second
+    // Graceful fallback: video pipeline still proceeds
+    const estimatedDuration = Math.ceil(text.length / 15);
     return {
       audioUrl: '',
       duration: estimatedDuration,
@@ -168,144 +116,29 @@ export async function generateAudio(
 }
 
 // ==========================================
-// AUDIO DURATION CALCULATION
+// LOCAL AUDIO FILE MANAGEMENT
 // ==========================================
 
-/**
- * Get actual audio duration using ffprobe
- */
 async function getAudioDuration(filepath: string): Promise<number> {
   try {
     const { stdout } = await execAsync(
       `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filepath}"`
     );
-
     const duration = parseFloat(stdout.trim());
-
     if (isNaN(duration) || duration <= 0) {
       throw new Error('Invalid duration from ffprobe');
     }
-
-    return Math.round(duration * 10) / 10; // Round to 1 decimal place
-  } catch (error) {
-    console.warn('⚠️  ffprobe not available, using estimation');
-    return estimateAudioDuration(filepath);
-  }
-}
-
-/**
- * Estimate audio duration based on file size
- * Fallback method when ffprobe is not available
- */
-async function estimateAudioDuration(filepath: string): Promise<number> {
-  try {
+    return Math.round(duration * 10) / 10;
+  } catch {
+    // Fallback: estimate from file size assuming ~128 kbps MP3
     const stats = await fs.stat(filepath);
     const fileSizeKB = stats.size / 1024;
-
-    // MP3 bitrate average: ~128 kbps
-    // Duration (seconds) = (File size in KB * 8) / bitrate
-    const estimatedDuration = (fileSizeKB * 8) / 128;
-
-    return Math.round(estimatedDuration * 10) / 10;
-  } catch (error) {
-    console.error('Error estimating duration:', error);
-    // Last resort: estimate from text length
-    return estimateDurationFromText(await fs.readFile(filepath, 'utf-8'));
+    return Math.round(((fileSizeKB * 8) / 128) * 10) / 10;
   }
 }
 
-/**
- * Estimate duration from text length
- * Average speaking rate: ~150 words per minute
- */
-function estimateDurationFromText(text: string): number {
-  const words = text.split(/\s+/).length;
-  const wordsPerMinute = 150;
-  const minutes = words / wordsPerMinute;
-  const seconds = minutes * 60;
-
-  return Math.round(seconds * 10) / 10;
-}
-
-// ==========================================
-// VOICE MANAGEMENT
-// ==========================================
-
-/**
- * Get available voices from ElevenLabs
- */
-export async function getAvailableVoices(): Promise<any[]> {
-  try {
-    const response = await axios.get(`${BASE_URL}/voices`, {
-      headers: {
-        'xi-api-key': ELEVENLABS_API_KEY,
-      },
-    });
-
-    return response.data.voices;
-  } catch (error) {
-    console.error('Error fetching voices:', error);
-    throw new Error('Failed to fetch available voices');
-  }
-}
-
-/**
- * Get voice details
- */
-export async function getVoiceDetails(voiceId: string): Promise<any> {
-  try {
-    const response = await axios.get(`${BASE_URL}/voices/${voiceId}`, {
-      headers: {
-        'xi-api-key': ELEVENLABS_API_KEY,
-      },
-    });
-
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching voice details:', error);
-    throw new Error('Failed to fetch voice details');
-  }
-}
-
-// ==========================================
-// QUOTA MANAGEMENT
-// ==========================================
-
-/**
- * Check API quota/usage
- */
-export async function checkQuota(): Promise<any> {
-  try {
-    const response = await axios.get(`${BASE_URL}/user`, {
-      headers: {
-        'xi-api-key': ELEVENLABS_API_KEY,
-      },
-    });
-
-    return {
-      characterCount: response.data.subscription.character_count,
-      characterLimit: response.data.subscription.character_limit,
-      remaining:
-        response.data.subscription.character_limit -
-        response.data.subscription.character_count,
-      resetDate: response.data.subscription.next_character_count_reset_unix,
-    };
-  } catch (error) {
-    console.error('Error checking quota:', error);
-    throw new Error('Failed to check API quota');
-  }
-}
-
-// ==========================================
-// AUDIO FILE MANAGEMENT
-// ==========================================
-
-/**
- * Delete an audio file
- */
 export async function deleteAudio(sceneId: string): Promise<void> {
   const filepath = path.join(STORAGE_DIR, `${sceneId}.mp3`);
-
   try {
     await fs.unlink(filepath);
     console.log(`🗑️  Deleted audio file: ${sceneId}.mp3`);
@@ -317,45 +150,29 @@ export async function deleteAudio(sceneId: string): Promise<void> {
   }
 }
 
-/**
- * Get audio file info
- */
 export async function getAudioInfo(sceneId: string): Promise<{
   exists: boolean;
   size?: number;
   duration?: number;
 }> {
   const filepath = path.join(STORAGE_DIR, `${sceneId}.mp3`);
-
   try {
     const stats = await fs.stat(filepath);
     const duration = await getAudioDuration(filepath);
-
-    return {
-      exists: true,
-      size: stats.size,
-      duration,
-    };
-  } catch (error) {
-    return {
-      exists: false,
-    };
+    return { exists: true, size: stats.size, duration };
+  } catch {
+    return { exists: false };
   }
 }
 
-/**
- * Cleanup old audio files
- */
 export async function cleanupOldAudioFiles(daysOld: number = 7): Promise<number> {
   const cutoffDate = Date.now() - daysOld * 24 * 60 * 60 * 1000;
   const files = await fs.readdir(STORAGE_DIR);
 
   let deletedCount = 0;
-
   for (const file of files) {
     const filepath = path.join(STORAGE_DIR, file);
     const stats = await fs.stat(filepath);
-
     if (stats.mtimeMs < cutoffDate) {
       await fs.unlink(filepath);
       deletedCount++;
@@ -370,24 +187,19 @@ export async function cleanupOldAudioFiles(daysOld: number = 7): Promise<number>
 // BATCH OPERATIONS
 // ==========================================
 
-/**
- * Generate audio for multiple scenes in batch
- */
 export async function generateAudioBatch(
   scenes: Array<{ id: string; text: string }>
-): Promise<ElevenLabsResponse[]> {
+): Promise<TTSResponse[]> {
   console.log(`🎙️  Batch generating audio for ${scenes.length} scenes`);
 
-  const results: ElevenLabsResponse[] = [];
+  const results: TTSResponse[] = [];
   const errors: Array<{ sceneId: string; error: string }> = [];
 
   for (const scene of scenes) {
     try {
       const result = await generateAudio(scene.text, scene.id);
       results.push(result);
-
-      // Add delay to respect rate limits (if applicable)
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 100));
     } catch (error) {
       console.error(`❌ Error generating audio for ${scene.id}:`, error);
       errors.push({
@@ -410,9 +222,6 @@ export async function generateAudioBatch(
 
 export default {
   generateAudio,
-  getAvailableVoices,
-  getVoiceDetails,
-  checkQuota,
   deleteAudio,
   getAudioInfo,
   cleanupOldAudioFiles,

@@ -1,73 +1,89 @@
-FROM python:3.11-slim
+# ============================================================
+# Stage 1 — builder: compiles Python deps with full toolchain.
+# Discarded after pip install; nothing here ships in the final image.
+# ============================================================
+FROM python:3.11-slim AS builder
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    # FFmpeg for video processing
-    ffmpeg \
-    # Cairo for graphics rendering
-    libcairo2-dev \
-    libpango1.0-dev \
-    # Font support
-    pkg-config \
-    python3-dev \
-    # LaTeX for mathematical formulas
-    texlive \
-    texlive-latex-extra \
-    texlive-fonts-extra \
-    texlive-latex-recommended \
-    texlive-science \
-    texlive-fonts-recommended \
-    cm-super \
-    dvipng \
-    # Build tools
+# Compile-time deps for pycairo, manimpango, onnxruntime wheels, etc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     make \
-    # Utilities
-    wget \
-    curl \
-    git \
-    # Cleanup
-    && apt-get clean \
+    pkg-config \
+    python3-dev \
+    libcairo2-dev \
+    libpango1.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+# Use a venv so the runtime stage just COPIES the whole tree, no path patching.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy requirements first (for better caching)
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# ============================================================
+# Stage 2 — runtime: slim Python + runtime libs + venv copy.
+# ============================================================
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PATH="/opt/venv/bin:$PATH"
+
+# Runtime libraries only — no -dev packages, no compilers.
+# TeX trimmed to what Manim actually needs (drops texlive-fonts-extra and
+# texlive-science which together are ~700 MB and unused by MathTex/Tex).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    texlive-latex-base \
+    texlive-latex-extra \
+    texlive-fonts-recommended \
+    cm-super \
+    dvipng \
+    dvisvgm \
+    wget \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bring over the Python venv (manim CLI, flask, piper-tts, etc.)
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+
 COPY app.py .
 COPY utils/ ./utils/
 
-# Create necessary directories
-RUN mkdir -p /app/output /app/temp /app/audio && \
-    chmod 777 /app/output /app/temp /app/audio
+RUN mkdir -p /app/output /app/temp /app/audio /app/voices && \
+    chmod 777 /app/output /app/temp /app/audio /app/voices
 
-# Create a non-root user
+# Pre-download Piper TTS voice (en_GB-jenny_dioco-medium, ~63 MB).
+# Skipped silently on network failure — app.py will retry at first /tts call.
+RUN wget -q -O /app/voices/en_GB-jenny_dioco-medium.onnx \
+    https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/jenny_dioco/medium/en_GB-jenny_dioco-medium.onnx \
+    && wget -q -O /app/voices/en_GB-jenny_dioco-medium.onnx.json \
+    https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/jenny_dioco/medium/en_GB-jenny_dioco-medium.onnx.json \
+    || echo "⚠️  Voice model download failed at build time — will retry at runtime"
+
 RUN useradd -m -u 1000 renderer && \
     chown -R renderer:renderer /app
 
-# Switch to non-root user
 USER renderer
 
-# Expose port
 EXPOSE 5000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:5000/health || exit 1
 
-# Run the application
 CMD ["python", "-u", "app.py"]

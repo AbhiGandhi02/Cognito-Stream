@@ -146,19 +146,25 @@ export async function triggerRendererWithCode(
  */
 export async function triggerRenderer(
     sceneId: string,
-    manimOperations: string[],
+    manimOperations: string[] | string,
     duration: number,
     quality: string = 'medium'
 ): Promise<RenderResult> {
     console.log(`🎨 Triggering renderer for scene: ${sceneId}`);
-    console.log(`📊 Operations: ${manimOperations.length}, Duration: ${duration}s, Quality: ${quality}`);
+
+    // Handle both array of operations (legacy) and raw Python string (new)
+    const manimCode = Array.isArray(manimOperations)
+        ? manimOperations.join('\n')
+        : manimOperations;
+
+    console.log(`📊 Code length: ${manimCode.length} chars, Duration: ${duration}s, Quality: ${quality}`);
 
     try {
         const response = await axios.post(
             `${RENDERER_URL}/render`,
             {
                 sceneId,
-                manimCode: manimOperations.join('\n'),
+                manimCode,
                 duration,
                 quality,
             },

@@ -5,9 +5,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, type Scene, type Storyboard } from '../services/api';
-import { Sidebar } from '../components/Sidebar';
-import { SceneEditor } from '../components/SceneEditor';
+import { api, type Storyboard } from '../services/api';
 import { VideoPlayer } from '../components/VideoPlayer';
 import { ProgressBar } from '../components/ProgressBar';
 import {
@@ -26,7 +24,6 @@ export function DashboardPage() {
     const [prompt, setPrompt] = useState('');
     const [storyboards, setStoryboards] = useState<Storyboard[]>([]);
     const [storyboard, setStoryboard] = useState<Storyboard | null>(null);
-    const [selectedScene, setSelectedScene] = useState<Scene | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string>();
     const [isConnected, setIsConnected] = useState(false);
@@ -62,14 +59,17 @@ export function DashboardPage() {
         fetchStoryboards();
     }, [fetchStoryboards]);
 
-    // Auto-poll while processing
+
+    // Auto-poll until final video is ready or pipeline fails
     useEffect(() => {
-        if (!storyboard || storyboard.status !== 'processing') return;
+        if (!storyboard) return;
+        // Stop polling if we already have the final video or status is failed
+        if (storyboard.finalVideoUrl || storyboard.status === 'failed') return;
         const interval = setInterval(() => {
             refreshStoryboard(storyboard.id);
         }, 3000);
         return () => clearInterval(interval);
-    }, [storyboard?.id, storyboard?.status, refreshStoryboard]);
+    }, [storyboard?.id, storyboard?.status, storyboard?.finalVideoUrl, refreshStoryboard]);
 
     // ==========================================
     // HANDLERS
@@ -82,7 +82,6 @@ export function DashboardPage() {
         try {
             const sb = await api.createStoryboard({ prompt, autoGenerate: true });
             setStoryboard(sb);
-            setSelectedScene(sb.scenes?.[0] || null);
             setPrompt('');
             setStoryboards((prev) => [sb, ...prev]);
         } catch (err) {
@@ -98,8 +97,7 @@ export function DashboardPage() {
         try {
             const sb = await api.createTestStoryboard();
             setStoryboard(sb);
-            setSelectedScene(sb.scenes?.[0] || null);
-            setStoryboards((prev) => [sb, ...prev]);
+            // Don't add test storyboards to the recent projects list
         } catch (err) {
             setError((err as Error).message);
         } finally {
@@ -107,56 +105,15 @@ export function DashboardPage() {
         }
     };
 
-    const handleSceneSave = async (
-        sceneId: string,
-        payload: { narration: string; manimOperations: string[] }
-    ) => {
-        const updated = await api.updateScene(sceneId, {
-            narration: payload.narration,
-            manimCode: payload.manimOperations as unknown as string,
-        });
-        setStoryboard((prev) =>
-            prev
-                ? { ...prev, scenes: prev.scenes.map((s) => (s.id === updated.id ? updated : s)) }
-                : prev
-        );
-        if (selectedScene?.id === updated.id) setSelectedScene(updated);
-    };
 
-    const handleSceneProcess = async (sceneId: string) => {
-        setStoryboard((prev) =>
-            prev
-                ? {
-                    ...prev,
-                    scenes: prev.scenes.map((s) =>
-                        s.id === sceneId ? { ...s, status: 'processing' as const } : s
-                    ),
-                }
-                : prev
-        );
-        try {
-            const updated = await api.processScene(sceneId);
-            setStoryboard((prev) =>
-                prev
-                    ? { ...prev, scenes: prev.scenes.map((s) => (s.id === updated.id ? updated : s)) }
-                    : prev
-            );
-            if (selectedScene?.id === updated.id) setSelectedScene(updated);
-        } catch (err) {
-            if (storyboard) refreshStoryboard(storyboard.id);
-            throw err;
-        }
-    };
 
     const handleSelectStoryboard = (sb: Storyboard) => {
         setStoryboard(sb);
-        setSelectedScene(sb.scenes?.[0] || null);
         setError(undefined);
     };
 
     const handleNewStoryboard = () => {
         setStoryboard(null);
-        setSelectedScene(null);
         setPrompt('');
         setError(undefined);
     };
@@ -214,8 +171,8 @@ export function DashboardPage() {
                 <div className="flex items-center gap-2 text-xs">
                     <div
                         className={`w-2 h-2 rounded-full ${isConnected
-                                ? 'bg-success shadow-sm shadow-success/50'
-                                : 'bg-danger shadow-sm shadow-danger/50'
+                            ? 'bg-success shadow-sm shadow-success/50'
+                            : 'bg-danger shadow-sm shadow-danger/50'
                             }`}
                     />
                     <span className="text-slate-500">
@@ -322,20 +279,9 @@ export function DashboardPage() {
                     </div>
                 </main>
             ) : (
-                /* ====================== WORKSPACE ====================== */
-                <main className="flex-1 flex gap-4 p-4 overflow-hidden">
-                    {/* Left sidebar */}
-                    <Sidebar
-                        storyboards={storyboards}
-                        selectedStoryboard={storyboard}
-                        selectedScene={selectedScene}
-                        onSelectStoryboard={handleSelectStoryboard}
-                        onSelectScene={setSelectedScene}
-                        onNewStoryboard={handleNewStoryboard}
-                    />
-
-                    {/* Main content area */}
-                    <div className="flex-1 overflow-y-auto space-y-4 min-w-0">
+                /* ====================== WORKSPACE — FINAL VIDEO VIEW ====================== */
+                <main className="flex-1 flex items-center justify-center px-4 py-8">
+                    <div className="w-full max-w-3xl space-y-6">
                         {/* Storyboard header */}
                         <div className="glass-card rounded-2xl p-5">
                             <div className="flex items-start justify-between">
@@ -356,15 +302,48 @@ export function DashboardPage() {
                                 </button>
                             </div>
 
-                            {(storyboard.status === 'processing' || (progress > 0 && progress < 100)) && (
-                                <div className="mt-4">
-                                    <ProgressBar
-                                        progress={progress}
-                                        label={`${completedScenes} / ${totalScenes} scenes complete`}
-                                    />
-                                </div>
-                            )}
+                            {/* Status badge */}
+                            <div className="mt-3 flex items-center gap-2">
+                                <div
+                                    className={`w-2 h-2 rounded-full ${storyboard.status === 'completed'
+                                        ? 'bg-success shadow-sm shadow-success/50'
+                                        : storyboard.status === 'processing'
+                                            ? 'bg-warning shadow-sm shadow-warning/50 animate-pulse'
+                                            : storyboard.status === 'failed'
+                                                ? 'bg-danger shadow-sm shadow-danger/50'
+                                                : 'bg-slate-600'
+                                        }`}
+                                />
+                                <span className="text-xs text-slate-500 capitalize">
+                                    {storyboard.status === 'processing'
+                                        ? `Processing — ${completedScenes} / ${totalScenes} scenes`
+                                        : storyboard.status}
+                                </span>
+                            </div>
                         </div>
+
+                        {/* Progress bar while processing */}
+                        {(storyboard.status === 'processing' || storyboard.status === 'draft') && !storyboard.finalVideoUrl && (
+                            <div className="glass-card rounded-2xl p-5 space-y-4">
+                                <div className="flex items-center gap-3">
+                                    <RefreshCcw className="w-5 h-5 animate-spin text-primary-400" />
+                                    <div>
+                                        <p className="text-sm font-medium text-slate-300">
+                                            {progress < 100
+                                                ? 'Generating your video...'
+                                                : 'Assembling final video...'}
+                                        </p>
+                                        <p className="text-xs text-slate-600 mt-0.5">
+                                            This runs fully automatically — sit back and relax.
+                                        </p>
+                                    </div>
+                                </div>
+                                <ProgressBar
+                                    progress={progress}
+                                    label={`${completedScenes} / ${totalScenes} scenes complete`}
+                                />
+                            </div>
+                        )}
 
                         {/* Error */}
                         {error && (
@@ -373,11 +352,67 @@ export function DashboardPage() {
                             </div>
                         )}
 
+                        {/* Failed status */}
+                        {storyboard.status === 'failed' && !storyboard.finalVideoUrl && (
+                            <div className="glass-card rounded-2xl p-5 space-y-3">
+                                <p className="text-sm text-danger">
+                                    ❌ Video generation failed. Some scenes could not be rendered.
+                                </p>
+                                <button
+                                    onClick={() => refreshStoryboard(storyboard.id)}
+                                    className="btn-secondary text-sm px-4 py-2"
+                                >
+                                    <RefreshCcw className="w-4 h-4 inline mr-1" />
+                                    Refresh Status
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Scene breakdown */}
+                        {storyboard.scenes && storyboard.scenes.length > 0 && (
+                            <div className="glass-card rounded-2xl p-5 space-y-3">
+                                <h3 className="text-sm font-semibold text-slate-400">
+                                    📋 Scene Breakdown
+                                </h3>
+                                <div className="space-y-2">
+                                    {storyboard.scenes.map((scene) => (
+                                        <div
+                                            key={scene.id}
+                                            className="flex items-start gap-3 rounded-xl bg-navy-900/40 border border-primary-500/5 px-4 py-3"
+                                        >
+                                            <div className="shrink-0 mt-0.5">
+                                                <div
+                                                    className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${scene.status === 'completed'
+                                                            ? 'bg-success/20 text-success'
+                                                            : scene.status === 'processing'
+                                                                ? 'bg-warning/20 text-warning animate-pulse'
+                                                                : scene.status === 'failed'
+                                                                    ? 'bg-danger/20 text-danger'
+                                                                    : 'bg-slate-700 text-slate-500'
+                                                        }`}
+                                                >
+                                                    {scene.status === 'completed' ? '✓' : scene.sceneNumber}
+                                                </div>
+                                            </div>
+                                            <div className="min-w-0 flex-1">
+                                                <p className="text-xs font-medium text-slate-300 line-clamp-1">
+                                                    Scene {scene.sceneNumber}
+                                                </p>
+                                                <p className="text-xs text-slate-600 mt-0.5 line-clamp-2">
+                                                    {scene.visualDescription || scene.narration}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
                         {/* Final video */}
                         {storyboard.finalVideoUrl && (
                             <div className="glass-card rounded-2xl p-5 space-y-4">
                                 <h3 className="text-sm font-semibold text-slate-400">
-                                    🎬 Final Video
+                                    🎬 Your Video Is Ready
                                 </h3>
                                 <div className="space-y-3">
                                     <VideoPlayer
@@ -396,47 +431,13 @@ export function DashboardPage() {
                             </div>
                         )}
 
-                        {/* Assembling message */}
-                        {!storyboard.finalVideoUrl && allScenesCompleted && storyboard.status === 'processing' && (
-                            <div className="glass-card rounded-2xl p-5 flex items-center gap-3">
-                                <RefreshCcw className="w-5 h-5 animate-spin text-primary-400" />
-                                <p className="text-sm text-slate-500">
-                                    Assembling final video from {totalScenes} scenes...
-                                </p>
-                            </div>
-                        )}
-
-                        {/* Scene editor */}
-                        {selectedScene && (
-                            <SceneEditor
-                                scene={selectedScene}
-                                onProcess={handleSceneProcess}
-                                onSave={handleSceneSave}
-                                isLoading={loading}
-                            />
-                        )}
-
-                        {/* Scene video preview */}
-                        {selectedScene?.videoUrl && (
-                            <div className="glass-card rounded-2xl p-5 space-y-3">
-                                <h3 className="text-sm font-semibold text-slate-400">
-                                    Scene {selectedScene.sceneNumber} Preview
-                                </h3>
-                                <VideoPlayer
-                                    videoUrl={selectedScene.videoUrl}
-                                    title={`Scene ${selectedScene.sceneNumber}`}
-                                    className="aspect-video"
-                                />
-                            </div>
-                        )}
-
                         {/* Back button */}
-                        <div className="pt-2 pb-8">
+                        <div className="pt-2 pb-8 text-center">
                             <button
                                 onClick={handleNewStoryboard}
                                 className="text-xs text-slate-600 hover:text-slate-400 transition-colors"
                             >
-                                ← Create New Storyboard
+                                ← Create New Video
                             </button>
                         </div>
                     </div>

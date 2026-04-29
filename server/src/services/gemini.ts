@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from 'groq-sdk';
 import {
   MANIM_CODE_SYSTEM_PROMPT,
   CODE_CORRECTION_SYSTEM_PROMPT,
@@ -31,6 +32,203 @@ interface StoryboardResponse {
 // ==========================================
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || '' });
+
+// ==========================================
+// LLM FALLBACK (Gemini → Groq)
+// ==========================================
+
+interface LLMCallOptions {
+  systemPrompt?: string;
+  userPrompt: string;
+  temperature?: number;
+  maxTokens?: number;
+  // Override the Gemini model for a single call (e.g. 'gemini-2.5-pro' for code).
+  // Falls back to GEMINI_MODEL env, then 'gemini-2.5-flash'.
+  geminiModel?: string;
+}
+
+// Module-local cooldown: when Gemini reports quota exhausted we skip it for
+// 30 minutes and route to Groq. Resets on server restart.
+const GEMINI_COOLDOWN_MS = 30 * 60 * 1000;
+let geminiBlockedUntil = 0;
+
+function isGeminiBlocked(): boolean {
+  return Date.now() < geminiBlockedUntil;
+}
+
+function blockGemini(reason: string): void {
+  geminiBlockedUntil = Date.now() + GEMINI_COOLDOWN_MS;
+  const minutes = Math.round(GEMINI_COOLDOWN_MS / 60000);
+  console.warn(`⚠️  Gemini cooldown for ${minutes}min — falling back to Groq. (${reason})`);
+}
+
+type GeminiErrorCategory = 'quota' | 'auth' | 'server' | 'other';
+
+function categorizeGeminiError(error: any): GeminiErrorCategory {
+  const status = error?.status ?? error?.response?.status;
+  const message = String(error?.message || '').toLowerCase();
+
+  if (
+    status === 429 ||
+    message.includes('quota') ||
+    message.includes('resource_exhausted') ||
+    message.includes('rate limit') ||
+    message.includes('exceeded')
+  ) {
+    return 'quota';
+  }
+  if (
+    status === 401 ||
+    status === 403 ||
+    message.includes('api_key_invalid') ||
+    message.includes('api key not found') ||
+    message.includes('permission_denied')
+  ) {
+    return 'auth';
+  }
+  if (
+    (typeof status === 'number' && status >= 500 && status < 600) ||
+    message.includes('service unavailable') ||
+    message.includes('high demand') ||
+    message.includes('overloaded') ||
+    message.includes('try again later')
+  ) {
+    return 'server';
+  }
+  return 'other';
+}
+
+function isQuotaError(error: any): boolean {
+  return categorizeGeminiError(error) === 'quota';
+}
+
+async function callGemini(opts: LLMCallOptions): Promise<string> {
+  const modelName =
+    opts.geminiModel || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    systemInstruction: opts.systemPrompt,
+    generationConfig: {
+      temperature: opts.temperature ?? 0.5,
+      maxOutputTokens: opts.maxTokens ?? 4096,
+    },
+  });
+  const result = await model.generateContent(opts.userPrompt);
+  return result.response.text() || '';
+}
+
+async function callGroq(opts: LLMCallOptions): Promise<string> {
+  const messages: Array<{ role: 'system' | 'user'; content: string }> = [];
+  if (opts.systemPrompt) messages.push({ role: 'system', content: opts.systemPrompt });
+  messages.push({ role: 'user', content: opts.userPrompt });
+
+  const completion = await groq.chat.completions.create({
+    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    messages,
+    temperature: opts.temperature ?? 0.5,
+    max_tokens: opts.maxTokens ?? 4096,
+  });
+  return completion.choices[0]?.message?.content || '';
+}
+
+/**
+ * Generate text via Gemini, falling back to Groq when Gemini is over quota.
+ */
+export async function callLLMText(opts: LLMCallOptions): Promise<string> {
+  if (!isGeminiBlocked()) {
+    try {
+      console.log('🧠 [Gemini] generating...');
+      const text = await callGemini(opts);
+      console.log(`✅ [Gemini] returned ${text.length} chars`);
+      return text;
+    } catch (err) {
+      const category = categorizeGeminiError(err);
+      if (category === 'quota' || category === 'auth' || category === 'server') {
+        if (category === 'auth') {
+          console.error('❌ Gemini API key issue — verify GEMINI_API_KEY in .env.');
+        } else if (category === 'server') {
+          console.warn('⚠️  Gemini upstream is overloaded (5xx) — switching to Groq.');
+        }
+        blockGemini(`${category}: ${String((err as Error).message || '').slice(0, 150)}`);
+        // fall through to Groq
+      } else {
+        throw err;
+      }
+    }
+  } else {
+    console.log('⏭️  [Gemini] in cooldown — using Groq');
+  }
+
+  console.log('🧠 [Groq] generating...');
+  const text = await callGroq(opts);
+  console.log(`✅ [Groq] returned ${text.length} chars`);
+  return text;
+}
+
+/**
+ * Probe both providers with a tiny prompt and report which one(s) work.
+ * Used by /api/health/llm — does NOT touch the cooldown state.
+ */
+export async function pingLLMs(): Promise<{
+  gemini: { ok: boolean; latencyMs: number; sample?: string; error?: string; quotaError?: boolean };
+  groq: { ok: boolean; latencyMs: number; sample?: string; error?: string };
+  fallback: { geminiInCooldown: boolean; cooldownExpiresAt: string | null };
+}> {
+  const probe: LLMCallOptions = {
+    systemPrompt: 'You are a test bot. Reply with one word.',
+    userPrompt: 'Reply with the single word: OK',
+    temperature: 0,
+    maxTokens: 10,
+  };
+
+  // Gemini probe
+  const geminiStart = Date.now();
+  let geminiResult: { ok: boolean; latencyMs: number; sample?: string; error?: string; quotaError?: boolean };
+  try {
+    const text = await callGemini(probe);
+    geminiResult = {
+      ok: true,
+      latencyMs: Date.now() - geminiStart,
+      sample: text.trim().slice(0, 50),
+    };
+  } catch (err: any) {
+    geminiResult = {
+      ok: false,
+      latencyMs: Date.now() - geminiStart,
+      error: String(err?.message || err).slice(0, 600),
+      quotaError: isQuotaError(err),
+    };
+  }
+
+  // Groq probe
+  const groqStart = Date.now();
+  let groqResult: { ok: boolean; latencyMs: number; sample?: string; error?: string };
+  try {
+    const text = await callGroq(probe);
+    groqResult = {
+      ok: true,
+      latencyMs: Date.now() - groqStart,
+      sample: text.trim().slice(0, 50),
+    };
+  } catch (err: any) {
+    groqResult = {
+      ok: false,
+      latencyMs: Date.now() - groqStart,
+      error: String(err?.message || err).slice(0, 600),
+    };
+  }
+
+  return {
+    gemini: geminiResult,
+    groq: groqResult,
+    fallback: {
+      geminiInCooldown: isGeminiBlocked(),
+      cooldownExpiresAt:
+        geminiBlockedUntil > Date.now() ? new Date(geminiBlockedUntil).toISOString() : null,
+    },
+  };
+}
 
 // ==========================================
 // MAIN FUNCTION
@@ -60,31 +258,23 @@ User Idea: "${prompt}"
 JSON Storyboard Output:
   `;
 
-  const model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-    generationConfig: {
-      temperature: 0.5,
-      maxOutputTokens: 4096,
-    },
-  });
-
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`🔄 Attempt ${attempt}/${maxRetries}`);
 
-      const result = await model.generateContent([
-        { text: promptForStoryboard },
-      ]);
-
-      const responseText = result.response.text()?.trim();
+      const responseText = (await callLLMText({
+        userPrompt: promptForStoryboard,
+        temperature: 0.5,
+        maxTokens: 4096,
+      })).trim();
 
       if (!responseText) {
-        throw new Error('Empty response from Gemini');
+        throw new Error('Empty response from LLM');
       }
 
-      console.log('📄 Raw Gemini response:', responseText.substring(0, 200));
+      console.log('📄 Raw LLM response:', responseText.substring(0, 200));
 
       // Parse JSON — handle both raw JSON and markdown-fenced JSON
       let parsedStoryboard: any;
@@ -93,14 +283,14 @@ JSON Storyboard Output:
         parsedStoryboard = jsonMatch && jsonMatch[1] ? JSON.parse(jsonMatch[1]) : JSON.parse(responseText);
       } catch (parseError) {
         console.error('❌ JSON parse error:', parseError);
-        throw new Error('Failed to parse storyboard JSON from Gemini. Ensure valid JSON output.');
+        throw new Error('Failed to parse storyboard JSON from LLM. Ensure valid JSON output.');
       }
 
       // Handle various response shapes (array, or object with .storyboard/.scenes)
       const scenesArray = parsedStoryboard.storyboard || parsedStoryboard.scenes || parsedStoryboard;
 
       if (!Array.isArray(scenesArray) || scenesArray.length === 0) {
-        throw new Error('Gemini did not return a valid storyboard array.');
+        throw new Error('LLM did not return a valid storyboard array.');
       }
 
       // Map SculptAI scene format to Cognito-Stream format
@@ -285,40 +475,33 @@ export async function generateManimSceneCode(
 ): Promise<string> {
   console.log(`🎨 Generating Manim code for scene ${params.sceneNumber}: "${params.sceneTitle}"`);
 
-  const model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-    generationConfig: {
-      temperature: 0.4, // Lower temp for more reliable code
-      maxOutputTokens: 4096,
-    },
-  });
-
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`🔄 Code generation attempt ${attempt}/${maxRetries}`);
 
-      const result = await model.generateContent([
-        { text: MANIM_CODE_SYSTEM_PROMPT },
-        { text: buildCodeGenPrompt(params) },
-      ]);
-
-      let code = result.response.text();
+      let code = await callLLMText({
+        systemPrompt: MANIM_CODE_SYSTEM_PROMPT,
+        userPrompt: buildCodeGenPrompt(params),
+        temperature: 0.4,
+        maxTokens: 4096,
+        geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-pro',
+      });
 
       if (!code || code.trim().length === 0) {
-        throw new Error('Empty code response from Gemini');
+        throw new Error('Empty code response from LLM');
       }
 
       // Strip markdown fences if present
       code = stripMarkdownFences(code);
 
-      // Basic validation
-      if (!code.includes('class GeneratedScene')) {
-        throw new Error('Generated code missing GeneratedScene class');
-      }
-      if (!code.includes('def construct')) {
-        throw new Error('Generated code missing construct method');
+      // Pre-render validation — catch known-bad patterns BEFORE shipping to the
+      // renderer. Each finding throws into the existing retry loop, saving a
+      // 60-90s Manim round-trip per bad attempt.
+      const issues = validateManimCode(code);
+      if (issues.length > 0) {
+        throw new Error(`Pre-render validation failed: ${issues.join('; ')}`);
       }
 
       console.log(`✅ Manim code generated (${code.length} chars)`);
@@ -348,23 +531,27 @@ export async function correctManimCode(
 ): Promise<string> {
   console.log(`🔧 Correcting Manim code (attempt ${params.attemptNumber})...`);
 
-  const model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-    generationConfig: {
-      temperature: 0.2, // Very low temp for precise fixes
-      maxOutputTokens: 4096,
-    },
+  // Compose the correction system prompt: include the FULL code-gen guidance so the
+  // model retains version constraints, allowed APIs, and few-shot patterns; then
+  // append the error-recovery-specific rules.
+  const compositeSystemPrompt = `${MANIM_CODE_SYSTEM_PROMPT}
+
+---
+
+ADDITIONAL ERROR RECOVERY RULES (the previous attempt failed — fix it):
+
+${CODE_CORRECTION_SYSTEM_PROMPT}`;
+
+  let code = await callLLMText({
+    systemPrompt: compositeSystemPrompt,
+    userPrompt: buildCodeCorrectionPrompt(params),
+    temperature: 0.2,
+    maxTokens: 4096,
+    geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-pro',
   });
 
-  const result = await model.generateContent([
-    { text: CODE_CORRECTION_SYSTEM_PROMPT },
-    { text: buildCodeCorrectionPrompt(params) },
-  ]);
-
-  let code = result.response.text();
-
   if (!code || code.trim().length === 0) {
-    throw new Error('Empty correction response from Gemini');
+    throw new Error('Empty correction response from LLM');
   }
 
   // Strip markdown fences if present
@@ -376,6 +563,60 @@ export async function correctManimCode(
 
   console.log(`✅ Code corrected (${code.length} chars)`);
   return code;
+}
+
+/**
+ * Static validation of generated Manim code. Returns a list of issues; empty
+ * list means the code passes. Catches the common LLM mistakes that would
+ * otherwise burn a full render cycle to surface.
+ */
+function validateManimCode(code: string): string[] {
+  const issues: string[] = [];
+
+  // Structural requirements
+  if (!code.includes('class GeneratedScene')) {
+    issues.push("missing 'class GeneratedScene'");
+  }
+  if (!code.includes('def construct')) {
+    issues.push("missing 'def construct' method");
+  }
+  if (!/from\s+manim\s+import/.test(code)) {
+    issues.push("missing 'from manim import ...'");
+  }
+
+  // Forbidden import paths (frequent LLM hallucinations)
+  if (/from\s+manim\.constants\s+import/.test(code)) {
+    issues.push("uses 'from manim.constants import ...' (use 'from manim import ...')");
+  }
+  if (/from\s+manim\.animation\.rate_functions\s+import/.test(code)) {
+    issues.push(
+      "uses 'manim.animation.rate_functions' (correct path: 'manim.utils.rate_functions')"
+    );
+  }
+
+  // Non-existent methods we've seen the LLM invent
+  if (/\.get_lines\s*\(/.test(code)) {
+    issues.push("'.get_lines()' is not a real Manim method — build Line() objects between vertices instead");
+  }
+  if (/\bCENTER\b(?!\s*=)/.test(code)) {
+    issues.push("'CENTER' is not exported by Manim — use 'ORIGIN'");
+  }
+
+  // HTML leakage in strings (Pango/Manim won't render these)
+  if (/Text\([^)]*<\/?\w+>/.test(code) || /MathTex\([^)]*<\/?\w+>/.test(code)) {
+    issues.push('HTML tag found inside a Text/MathTex string — strip it');
+  }
+
+  // Truncation / unbalanced braces (rough heuristic)
+  const openParens = (code.match(/\(/g) || []).length;
+  const closeParens = (code.match(/\)/g) || []).length;
+  if (Math.abs(openParens - closeParens) > 2) {
+    issues.push(
+      `unbalanced parentheses (${openParens} '(' vs ${closeParens} ')') — code may be truncated`
+    );
+  }
+
+  return issues;
 }
 
 /**

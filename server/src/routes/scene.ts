@@ -8,6 +8,17 @@ import { z } from 'zod';
 
 const router = Router();
 
+/** Safely parse manimCode — handles both JSON arrays and raw Python strings */
+function safeParseManimCode(manimCode: string | null): any {
+  if (!manimCode) return {};
+  try {
+    return JSON.parse(manimCode);
+  } catch {
+    // It's a raw Python string, return as-is
+    return manimCode;
+  }
+}
+
 // ==========================================
 // VALIDATION SCHEMAS
 // ==========================================
@@ -56,7 +67,7 @@ router.get(
 
     return res.json({
       ...scene,
-      manimCode: JSON.parse(scene.manimCode),
+      manimCode: safeParseManimCode(scene.manimCode),
     });
   })
 );
@@ -120,7 +131,7 @@ router.patch(
 
     return res.json({
       ...updatedScene,
-      manimCode: JSON.parse(updatedScene.manimCode),
+      manimCode: safeParseManimCode(updatedScene.manimCode),
     });
   })
 );
@@ -173,7 +184,7 @@ router.post(
 
       // Step 2: Trigger renderer service
       console.log(`🎨 Rendering video for scene ${scene.sceneNumber}...`);
-      const manimOperations = JSON.parse(scene.manimCode);
+      const manimOperations = safeParseManimCode(scene.manimCode);
       const renderResult = await triggerRenderer(
         scene.id,
         manimOperations,
@@ -196,7 +207,7 @@ router.post(
 
       return res.json({
         ...completedScene,
-        manimCode: JSON.parse(completedScene.manimCode),
+        manimCode: safeParseManimCode(completedScene.manimCode),
       });
 
     } catch (error) {
@@ -252,7 +263,7 @@ router.post(
 
       return res.json({
         ...updatedScene,
-        manimCode: JSON.parse(updatedScene.manimCode),
+        manimCode: safeParseManimCode(updatedScene.manimCode),
       });
 
     } catch (error) {
@@ -298,7 +309,7 @@ router.post(
         data: { status: 'processing' },
       });
 
-      const manimOperations = JSON.parse(scene.manimCode);
+      const manimOperations = safeParseManimCode(scene.manimCode);
       const renderResult = await triggerRenderer(
         scene.id,
         manimOperations,
@@ -316,7 +327,7 @@ router.post(
 
       return res.json({
         ...updatedScene,
-        manimCode: JSON.parse(updatedScene.manimCode),
+        manimCode: safeParseManimCode(updatedScene.manimCode),
       });
 
     } catch (error) {

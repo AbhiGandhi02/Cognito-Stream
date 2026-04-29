@@ -5,7 +5,7 @@
  *   1. Generate Manim Python code via Gemini
  *   2. Send code to renderer
  *   3. If rendering fails → correct code via Gemini → retry (up to MAX_CORRECTION_ATTEMPTS)
- *   4. Generate TTS audio via ElevenLabs
+ *   4. Generate TTS audio via Piper (renderer /tts endpoint)
  *   5. Update scene in Prisma DB
  *
  * Scenes are processed in parallel with a concurrency limit.
@@ -21,7 +21,10 @@ import { generateAudio } from './elevenlabs';
 // ==========================================
 
 const MAX_CORRECTION_ATTEMPTS = 3;
-const PARALLEL_CONCURRENCY = 1; // Process 1 scene at a time to respect rate limits
+// Process N scenes simultaneously. Each Manim render takes 30-60s, so
+// concurrency 3 cuts an 8-scene pipeline from ~6min to ~2min on a 4-CPU container.
+// LLM rate limits are handled by the Gemini→Groq fallback in gemini.ts.
+const PARALLEL_CONCURRENCY = Number(process.env.SCENE_CONCURRENCY) || 3;
 
 // ==========================================
 // TYPES
@@ -81,9 +84,14 @@ export async function processStoryboardScenes(
 
     const results: SceneProcessingResult[] = [];
 
+    // Accumulate a running summary of completed scenes so the LLM has narrative
+    // continuity (same example array, same notation, same variables across scenes).
+    const sceneSummaries: string[] = [];
+
     // Process scenes in batches for controlled concurrency
     for (let i = 0; i < storyboard.scenes.length; i += PARALLEL_CONCURRENCY) {
         const batch = storyboard.scenes.slice(i, i + PARALLEL_CONCURRENCY);
+        const previousSceneContext = sceneSummaries.join('\n');
 
         const batchResults = await Promise.allSettled(
             batch.map((scene) =>
@@ -91,7 +99,8 @@ export async function processStoryboardScenes(
                     scene,
                     storyboard.prompt,
                     storyboard.title,
-                    totalScenes
+                    totalScenes,
+                    previousSceneContext
                 )
             )
         );
@@ -99,6 +108,13 @@ export async function processStoryboardScenes(
         for (const result of batchResults) {
             if (result.status === 'fulfilled') {
                 results.push(result.value);
+                // Add a brief summary of this scene for downstream scenes' context.
+                const sourceScene = batch.find((s) => s.id === result.value.sceneId);
+                if (sourceScene && result.value.status === 'completed') {
+                    sceneSummaries.push(
+                        `Scene ${sourceScene.sceneNumber} ("${sourceScene.visualDescription.slice(0, 80)}"): ${sourceScene.narration.slice(0, 200)}`
+                    );
+                }
             } else {
                 // This shouldn't happen since processScene catches errors internally
                 results.push({
@@ -167,7 +183,8 @@ async function processScene(
     },
     overallTopic: string,
     storyboardTitle: string,
-    totalScenes: number
+    totalScenes: number,
+    previousSceneContext: string
 ): Promise<SceneProcessingResult> {
     const sceneLabel = `Scene ${scene.sceneNumber}`;
     console.log(`\n🎬 [${sceneLabel}] Starting processing...`);
@@ -179,29 +196,38 @@ async function processScene(
             data: { status: 'processing' },
         });
 
-        // --- Step 1: Generate Manim code ---
-        console.log(`🎨 [${sceneLabel}] Generating Manim code...`);
+        // --- Step 1: Generate Manim code (or reuse pre-stored code) ---
+        let manimCode: string;
 
-        // Parse the scene title from manimCode or use a default
-        let sceneTitle = `Scene ${scene.sceneNumber}`;
-        try {
-            const parsed = JSON.parse(scene.manimCode);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-                sceneTitle = parsed[0].substring(0, 50);
+        // If the scene already has a complete Manim script, skip AI generation
+        if (scene.manimCode && scene.manimCode.includes('class GeneratedScene')) {
+            console.log(`♻️ [${sceneLabel}] Using pre-stored Manim code (no AI call)`);
+            manimCode = scene.manimCode;
+        } else {
+            console.log(`🎨 [${sceneLabel}] Generating Manim code via AI...`);
+
+            // Parse the scene title from manimCode or use a default
+            let sceneTitle = `Scene ${scene.sceneNumber}`;
+            try {
+                const parsed = JSON.parse(scene.manimCode);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    sceneTitle = parsed[0].substring(0, 50);
+                }
+            } catch {
+                // manimCode may not be JSON, that's fine
             }
-        } catch {
-            // manimCode may not be JSON, that's fine
-        }
 
-        let manimCode = await generateManimSceneCode({
-            sceneTitle,
-            narration: scene.narration,
-            visualDescription: scene.visualDescription,
-            duration: scene.estimatedDuration,
-            sceneNumber: scene.sceneNumber,
-            totalScenes,
-            overallTopic,
-        });
+            manimCode = await generateManimSceneCode({
+                sceneTitle,
+                narration: scene.narration,
+                visualDescription: scene.visualDescription,
+                duration: scene.estimatedDuration,
+                sceneNumber: scene.sceneNumber,
+                totalScenes,
+                overallTopic,
+                previousSceneContext: previousSceneContext || undefined,
+            });
+        }
 
         // --- Step 2: Render with correction loop ---
         let correctionAttempts = 0;

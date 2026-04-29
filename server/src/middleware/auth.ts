@@ -37,7 +37,8 @@ export function requireAuth(
       email: 'user@example.com',
     };
   
-    next();
+  
+    return next();
   }
   
   export function optionalAuth(
@@ -59,5 +60,6 @@ export function requireAuth(
       }
     }
   
-    next();
+  
+    return next();
   }

@@ -6,6 +6,16 @@ import { z } from 'zod';
 
 const router = Router();
 
+/** Safely parse manimCode — handles both JSON arrays and raw Python strings */
+function safeParseManimCode(manimCode: string | null): any {
+  if (!manimCode) return {};
+  try {
+    return JSON.parse(manimCode);
+  } catch {
+    return manimCode;
+  }
+}
+
 // ==========================================
 // VALIDATION SCHEMAS
 // ==========================================
@@ -119,7 +129,7 @@ router.post(
         ...completedStoryboard,
         scenes: completedStoryboard.scenes.map((scene) => ({
           ...scene,
-          manimCode: JSON.parse(scene.manimCode),
+          manimCode: safeParseManimCode(scene.manimCode),
         })),
       });
     } catch (error) {
@@ -193,7 +203,7 @@ router.post(
         });
 
         // Render video
-        const manimOperations = JSON.parse(scene.manimCode);
+        const manimOperations = safeParseManimCode(scene.manimCode);
         const renderResult = await triggerRenderer(
           scene.id,
           manimOperations,
@@ -355,7 +365,7 @@ router.post(
       });
 
       // Render video
-      const manimOperations = JSON.parse(scene.manimCode);
+      const manimOperations = safeParseManimCode(scene.manimCode);
       const renderResult = await triggerRenderer(
         scene.id,
         manimOperations,
@@ -373,7 +383,7 @@ router.post(
 
       return res.json({
         ...completedScene,
-        manimCode: JSON.parse(completedScene.manimCode),
+        manimCode: safeParseManimCode(completedScene.manimCode),
       });
     } catch (error) {
       await prisma.scene.update({

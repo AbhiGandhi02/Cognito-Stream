@@ -22,19 +22,18 @@
     "noUnusedParameters": false,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "baseUrl": ".",
     "paths": {
       "@/*": [
-        "src/*"
+        "./src/*"
       ],
       "@types/*": [
-        "src/types/*"
+        "./src/types/*"
       ],
       "@services/*": [
-        "src/services/*"
+        "./src/services/*"
       ],
       "@routes/*": [
-        "src/routes/*"
+        "./src/routes/*"
       ]
     }
   },
