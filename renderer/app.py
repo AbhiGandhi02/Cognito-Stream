@@ -484,6 +484,40 @@ def concatenate_videos(video_paths, output_path):
         logger.error(f"Video concatenation failed: {e}")
         raise
 
+def concatenate_audio(audio_paths, output_path):
+    """Concatenate multiple mp3 files into one using FFmpeg's concat demuxer.
+    Re-encodes to libmp3lame because copy-mode can produce VBR-mismatched output."""
+
+    logger.info(f"Concatenating {len(audio_paths)} audio files...")
+
+    concat_file = TEMP_DIR / f'concat_audio_{int(time.time())}.txt'
+    with open(concat_file, 'w') as f:
+        for audio_path in audio_paths:
+            abs_path = Path(audio_path).resolve()
+            f.write(f"file '{abs_path}'\n")
+
+    cmd = [
+        'ffmpeg',
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', str(concat_file),
+        '-c:a', 'libmp3lame',
+        '-b:a', '128k',
+        '-y',
+        str(output_path),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise Exception(f"FFmpeg audio concat error: {result.stderr}")
+        concat_file.unlink(missing_ok=True)
+        logger.info(f"✓ Audio concatenated successfully")
+        return output_path
+    except Exception as e:
+        logger.error(f"Audio concatenation failed: {e}")
+        raise
+
 def get_video_duration(video_path):
     """Get video duration using ffprobe"""
     
@@ -668,13 +702,10 @@ def render_scene():
         # Cleanup scene file
         scene_file.unlink()
 
-        # Upload to Supabase if configured.
-        public_url = upload_to_storage(
-            local_path=str(video_path),
-            storage_path=f'videos/{scene_id}.mp4',
-            content_type='video/mp4',
-        )
-        video_url = public_url or f'/videos/{scene_id}.mp4'
+        # Per-scene videos stay on local disk; they are intermediates that get
+        # concatenated by /assemble. Only the final stitched video is uploaded
+        # to Supabase to keep bucket usage minimal.
+        video_url = f'/videos/{scene_id}.mp4'
 
         return jsonify({
             'success': True,
@@ -963,14 +994,9 @@ def render_full_code():
 
         logger.info(f"✓ Code render complete: {scene_id} ({render_time:.2f}s)")
 
-        # Upload to Supabase Storage if configured. Falls back to local path
-        # in dev mode when SUPABASE_SERVICE_ROLE_KEY isn't set.
-        public_url = upload_to_storage(
-            local_path=str(output_file),
-            storage_path=f'videos/{scene_id}.mp4',
-            content_type='video/mp4',
-        )
-        video_url = public_url or f'/videos/{scene_id}.mp4'
+        # Per-scene videos stay on local disk; only the final assembled video
+        # is uploaded to Supabase by /assemble to keep bucket usage minimal.
+        video_url = f'/videos/{scene_id}.mp4'
 
         return jsonify({
             'success': True,
@@ -1020,7 +1046,9 @@ def assemble_video():
         work_dir = TEMP_DIR / f'assemble_{storyboard_id}_{int(time.time())}'
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        video_paths = []
+        video_paths = []           # per-scene videos with audio stitched in
+        per_scene_audio_paths = [] # per-scene narration mp3s, for the final voice track
+        scene_local_files = []     # local intermediates to delete on success
         total_duration = 0
 
         try:
@@ -1037,6 +1065,9 @@ def assemble_video():
                 if not video_path.exists():
                     logger.warning(f"Video not found after fetch: {video_path}")
                     continue
+                # Track the per-scene mp4 in OUTPUT_DIR for cleanup after success.
+                if video_url.startswith('/videos/'):
+                    scene_local_files.append(OUTPUT_DIR / video_url[len('/videos/'):])
 
                 # Stitch audio if provided.
                 if audio_url:
@@ -1046,6 +1077,7 @@ def assemble_video():
                             stitched_path = work_dir / f"{video_path.stem}_with_audio.mp4"
                             stitch_audio_video(video_path, audio_path, stitched_path)
                             video_paths.append(stitched_path)
+                            per_scene_audio_paths.append(audio_path)
                             logger.info(f"✓ Stitched audio into scene {scene.get('sceneNumber')}")
                         else:
                             logger.warning(f"Audio file missing after fetch: {audio_path}")
@@ -1053,6 +1085,8 @@ def assemble_video():
                     except Exception as stitch_err:
                         logger.error(f"Audio stitch failed for scene {scene.get('sceneNumber')}: {stitch_err}")
                         video_paths.append(video_path)
+                    if audio_url.startswith('/audio/'):
+                        scene_local_files.append(AUDIO_DIR / audio_url[len('/audio/'):])
                 else:
                     video_paths.append(video_path)
 
@@ -1072,8 +1106,7 @@ def assemble_video():
             logger.info(f"✓ Final video assembled: {output_file}")
             logger.info(f"Total duration: {final_duration}s")
 
-            # Move to OUTPUT_DIR (so local-mode frontend can still serve it via
-            # /videos static route) AND upload to Supabase if configured.
+            # Persist final mp4 to OUTPUT_DIR and upload to Supabase.
             persistent_path = OUTPUT_DIR / f'{storyboard_id}_final.mp4'
             shutil.copy(str(output_file), str(persistent_path))
 
@@ -1083,6 +1116,35 @@ def assemble_video():
                 content_type='video/mp4',
             )
             video_url = public_url or f'/videos/{storyboard_id}_final.mp4'
+
+            # Concatenate per-scene narration into a single final voice track
+            # and upload as audio/<storyboardId>_final.mp3. Skip silently if
+            # there were no per-scene audio files (edge case).
+            audio_url = None
+            if per_scene_audio_paths:
+                try:
+                    final_audio_local = work_dir / f'{storyboard_id}_final.mp3'
+                    concatenate_audio(per_scene_audio_paths, final_audio_local)
+                    persistent_audio = AUDIO_DIR / f'{storyboard_id}_final.mp3'
+                    shutil.copy(str(final_audio_local), str(persistent_audio))
+
+                    audio_public = upload_to_storage(
+                        local_path=str(persistent_audio),
+                        storage_path=f'audio/{storyboard_id}_final.mp3',
+                        content_type='audio/mpeg',
+                    )
+                    audio_url = audio_public or f'/audio/{storyboard_id}_final.mp3'
+                    logger.info(f"✓ Final voice track uploaded: {audio_url}")
+                except Exception as audio_err:
+                    logger.error(f"Final voice concat/upload failed: {audio_err}")
+
+            # Final video is shipped — delete per-scene intermediates from
+            # local disk so the bucket and the renderer disk only retain finals.
+            for f in scene_local_files:
+                try:
+                    Path(f).unlink(missing_ok=True)
+                except Exception as cleanup_err:
+                    logger.warning(f"Failed to delete intermediate {f}: {cleanup_err}")
         finally:
             # Always clean up the working dir (downloads + stitched intermediates).
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -1090,6 +1152,7 @@ def assemble_video():
         return jsonify({
             'success': True,
             'videoUrl': video_url,
+            'audioUrl': audio_url,
             'storyboardId': storyboard_id,
             'totalDuration': final_duration,
             'scenesCount': len(video_paths)
@@ -1147,13 +1210,9 @@ def text_to_speech():
 
         logger.info(f"✅ TTS complete: {mp3_path.name} ({duration}s, took {elapsed}s)")
 
-        # Upload mp3 to Supabase Storage if configured.
-        public_url = upload_to_storage(
-            local_path=str(mp3_path),
-            storage_path=f'audio/{scene_id}.mp3',
-            content_type='audio/mpeg',
-        )
-        audio_url = public_url or f'/audio/{scene_id}.mp3'
+        # Per-scene narration stays on local disk; only the final concatenated
+        # voice track is uploaded to Supabase by /assemble.
+        audio_url = f'/audio/{scene_id}.mp3'
 
         return jsonify({
             'success': True,

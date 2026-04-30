@@ -18,7 +18,9 @@
       "Bash(curl -s -X POST http://localhost:5000/tts -H \"Content-Type: application/json\" -d '{\"text\":\"Hello, this is a test of audio generation in Cognito Stream.\",\"sceneId\":\"test-audio-001\"}')",
       "Bash(curl -s -o /tmp/cs-audio.mp3 -w \"size=%{size_download} type=%{content_type}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/audio/test-audio-001.mp3\")",
       "Read(//tmp/**)",
-      "Bash(curl -s -o /tmp/cs-video.mp4 -w \"size=%{size_download} type=%{content_type}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/videos/test-video-001.mp4\")"
+      "Bash(curl -s -o /tmp/cs-video.mp4 -w \"size=%{size_download} type=%{content_type}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/videos/test-video-001.mp4\")",
+      "Bash(curl -s -o /tmp/cs-final-video.mp4 -w \"video: size=%{size_download}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/videos/demo-storyboard_final.mp4\")",
+      "Bash(curl -s -o /tmp/cs-final-audio.mp3 -w \"audio: size=%{size_download}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/audio/demo-storyboard_final.mp3\")"
     ]
   }
 }
