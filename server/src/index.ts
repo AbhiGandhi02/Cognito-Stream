@@ -18,6 +18,9 @@ console.log('🔗 Renderer URL:', process.env.RENDERER_URL || 'http://localhost:
 import storyboardRouter from './routes/storyboard';
 import sceneRouter from './routes/scene';
 import renderRouter from './routes/render';
+import meRouter from './routes/me';
+import adminRouter from './routes/admin';
+import { requireAuth, requireAdmin } from './middleware/auth';
 
 // ==========================================
 // APP SETUP
@@ -25,8 +28,20 @@ import renderRouter from './routes/render';
 
 const app = express();
 
-// Middleware
-app.use(cors());
+// Middleware — restrict CORS to the configured client origin in production.
+// In dev (no CLIENT_URL set) we allow everything so localhost:5173 works.
+// CLIENT_URL accepts a single origin or comma-separated list.
+const allowedOrigins = (process.env.CLIENT_URL || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 // ==========================================
@@ -49,10 +64,13 @@ app.get('/api/health/llm', async (_req, res) => {
   }
 });
 
-// API Routes
-app.use('/api/storyboard', storyboardRouter);
-app.use('/api/scene', sceneRouter);
-app.use('/api/render', renderRouter);
+// API Routes — all gated behind Supabase JWT verification
+app.use('/api/me', requireAuth, meRouter);
+app.use('/api/storyboard', requireAuth, storyboardRouter);
+app.use('/api/scene', requireAuth, sceneRouter);
+app.use('/api/render', requireAuth, renderRouter);
+// Admin routes — additionally require ADMIN role
+app.use('/api/admin', requireAuth, requireAdmin, adminRouter);
 
 // (POST /api/storyboard/:id/render is now handled by the storyboard router
 // in routes/storyboard.ts — it runs the full code-gen + render + assembly

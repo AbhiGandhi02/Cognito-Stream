@@ -31,7 +31,18 @@ function safeParseManimCode(manimCode: string | null): any {
 async function processAllScenes(storyboardId: string): Promise<void> {
   console.log(`🎬 Starting orchestrated pipeline for storyboard: ${storyboardId}`);
 
-  const result = await processStoryboardScenes(storyboardId);
+  let result;
+  try {
+    result = await processStoryboardScenes(storyboardId);
+  } catch (orchestrationError) {
+    const msg = orchestrationError instanceof Error ? orchestrationError.message : 'Unknown error';
+    console.error('❌ Orchestration crashed:', msg);
+    await prisma.storyboard.update({
+      where: { id: storyboardId },
+      data: { status: 'failed', errorMessage: msg.slice(0, 2000) },
+    });
+    return;
+  }
 
   // After orchestration, assemble final video from completed scenes
   if (result.completedScenes > 0) {
@@ -61,16 +72,32 @@ async function processAllScenes(storyboardId: string): Promise<void> {
             finalVideoUrl: assemblyResult.videoUrl,
             totalDuration: assemblyResult.totalDuration,
             status: 'completed',
+            errorMessage: null,
           },
         });
 
         console.log(`🎉 Pipeline complete! Final video: ${assemblyResult.videoUrl}`);
       }
     } catch (assemblyError) {
-      console.error('❌ Final video assembly failed:', assemblyError);
+      const msg = assemblyError instanceof Error ? assemblyError.message : 'Unknown error';
+      console.error('❌ Final video assembly failed:', msg);
+      await prisma.storyboard.update({
+        where: { id: storyboardId },
+        data: {
+          status: 'failed',
+          errorMessage: `Final assembly failed: ${msg}`.slice(0, 2000),
+        },
+      });
     }
   } else {
     console.log('⚠️ No scenes rendered successfully');
+    await prisma.storyboard.update({
+      where: { id: storyboardId },
+      data: {
+        status: 'failed',
+        errorMessage: `All ${result.totalScenes} scene(s) failed to render. See per-scene errors for details.`,
+      },
+    });
   }
 }
 
@@ -82,7 +109,8 @@ const createStoryboardSchema = z.object({
   prompt: z.string()
     .min(10, 'Prompt must be at least 10 characters')
     .max(2000, 'Prompt must be less than 2000 characters'),
-  userId: z.string().optional(),
+  // userId is no longer accepted from the request body — it's pulled from
+  // the verified Supabase JWT via requireAuth middleware (req.user.id).
   autoGenerate: z.boolean().optional().default(true),
 });
 
@@ -269,9 +297,11 @@ class GeneratedScene(Scene):
 
     // ── Create storyboard in DB ─────────────────────────────────────
 
+    const userId = req.user!.id;
     const storyboard = await prisma.$transaction(async (tx) => {
       const newStoryboard = await tx.storyboard.create({
         data: {
+          userId,
           title: 'Test: Cognito Stream Demo',
           description: 'Hardcoded test storyboard — no AI credits used',
           prompt: 'TEST: Cognito Stream demo with shapes, Pythagorean theorem, and linear graph',
@@ -318,15 +348,17 @@ router.post(
   '/',
   validateRequest(createStoryboardSchema),
   asyncHandler(async (req: Request, res: Response) => {
-    const { prompt, userId } = req.body;
+    const { prompt } = req.body;
+    const userId = req.user!.id; // requireAuth middleware guarantees this
 
-    console.log(`📝 Generating storyboard for prompt: "${prompt.substring(0, 50)}..."`);
+    console.log(`📝 Generating storyboard for prompt: "${prompt.substring(0, 50)}..." (user ${userId})`);
 
     const storyboardData = await generateStoryboard(prompt);
 
     const storyboard = await prisma.$transaction(async (tx) => {
       const newStoryboard = await tx.storyboard.create({
         data: {
+          userId,
           title: storyboardData.title,
           description: storyboardData.description,
           prompt,
@@ -400,9 +432,10 @@ router.post(
   '/:id/render',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
 
-    const storyboard = await prisma.storyboard.findUnique({
-      where: { id },
+    const storyboard = await prisma.storyboard.findFirst({
+      where: { id, userId },
       include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
     });
 
@@ -456,8 +489,11 @@ router.get(
   '/',
   asyncHandler(async (req: Request, res: Response) => {
     const query = listQuerySchema.parse(req.query);
+    const userId = req.user!.id;
 
-    const where = query.status ? { status: query.status } : {};
+    const where = query.status
+      ? { status: query.status, userId }
+      : { userId };
 
     const [storyboards, total] = await Promise.all([
       prisma.storyboard.findMany({
@@ -500,9 +536,10 @@ router.get(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
 
-    const storyboard = await prisma.storyboard.findUnique({
-      where: { id },
+    const storyboard = await prisma.storyboard.findFirst({
+      where: { id, userId },
       include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
     });
 
@@ -527,6 +564,13 @@ router.patch(
   validateRequest(updateStoryboardSchema),
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
+
+    // Verify ownership before updating.
+    const existing = await prisma.storyboard.findFirst({ where: { id, userId } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Not Found', message: 'Storyboard not found' });
+    }
 
     const storyboard = await prisma.storyboard.update({
       where: { id },
@@ -551,6 +595,12 @@ router.delete(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
+
+    const existing = await prisma.storyboard.findFirst({ where: { id, userId } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Not Found', message: 'Storyboard not found' });
+    }
 
     await prisma.storyboard.delete({ where: { id } });
 
@@ -568,9 +618,10 @@ router.get(
   '/:id/stats',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
 
-    const storyboard = await prisma.storyboard.findUnique({
-      where: { id },
+    const storyboard = await prisma.storyboard.findFirst({
+      where: { id, userId },
       include: { scenes: true },
     });
 

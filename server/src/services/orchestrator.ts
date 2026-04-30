@@ -189,6 +189,9 @@ async function processScene(
     const sceneLabel = `Scene ${scene.sceneNumber}`;
     console.log(`\n🎬 [${sceneLabel}] Starting processing...`);
 
+    // Hoisted so the catch block can persist the count alongside the error.
+    let correctionAttempts = 0;
+
     try {
         // Mark scene as processing
         await prisma.scene.update({
@@ -230,7 +233,6 @@ async function processScene(
         }
 
         // --- Step 2: Render with correction loop ---
-        let correctionAttempts = 0;
         let renderResult = await triggerRendererWithCode(scene.id, manimCode);
 
         while (!renderResult.success && correctionAttempts < MAX_CORRECTION_ATTEMPTS) {
@@ -276,6 +278,8 @@ async function processScene(
                 audioUrl: audioResult.audioUrl || null,
                 actualDuration,
                 manimCode: manimCode, // Store the working Manim code
+                correctionAttempts,
+                errorMessage: null, // clear any prior failure
             },
         });
 
@@ -294,17 +298,22 @@ async function processScene(
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         console.error(`❌ [${sceneLabel}] Processing failed:`, errorMessage);
 
-        // Mark scene as failed
+        // Mark scene as failed AND record the error + attempts so admins can
+        // see why it broke without scrolling server logs.
         await prisma.scene.update({
             where: { id: scene.id },
-            data: { status: 'failed' },
+            data: {
+                status: 'failed',
+                errorMessage: errorMessage.slice(0, 2000), // cap so a stack trace doesn't bloat the row
+                correctionAttempts,
+            },
         });
 
         return {
             sceneId: scene.id,
             sceneNumber: scene.sceneNumber,
             status: 'failed',
-            correctionAttempts: 0,
+            correctionAttempts,
             error: errorMessage,
         };
     }

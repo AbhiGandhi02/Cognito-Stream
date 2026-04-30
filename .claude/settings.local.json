@@ -3,7 +3,22 @@
     "allow": [
       "Bash(ffprobe -v error -show_streams -of json c:/Users/abhig/Documents/Cognito-Stream/storage/output/cmojuga3s0001gvm0vjke0phc_final.mp4)",
       "Bash(ffprobe -v error -show_streams -of json c:/Users/abhig/Documents/Cognito-Stream/storage/audio/cmojuga3s0002gvm0ogji9v6h.mp3)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(npx prisma *)",
+      "Bash(npm install *)",
+      "Bash(node check_db.mjs)",
+      "Bash(grep -E \"\\\\.\\(log|tmp|bak|swp|orig\\)$|^\\\\./\\\\.DS_Store|/__pycache__/|\\\\.pyc$\")",
+      "Read(//tmp/claude/c--Users-abhig-Documents-Cognito-Stream/fe1f3324-28a5-4dcc-9584-80bc8ea49784/tasks/**)",
+      "Bash(rm -rf renderer/__pycache__)",
+      "Bash(rmdir renderer/tests)",
+      "Bash(curl -s -o /dev/null -w \"renderer:%{http_code}\\\\n\" http://localhost:5000/health)",
+      "Bash(curl -s -o /dev/null -w \"server:%{http_code}\\\\n\" http://localhost:3000/health)",
+      "Bash(docker exec *)",
+      "Bash(docker compose *)",
+      "Bash(curl -s -X POST http://localhost:5000/tts -H \"Content-Type: application/json\" -d '{\"text\":\"Hello, this is a test of audio generation in Cognito Stream.\",\"sceneId\":\"test-audio-001\"}')",
+      "Bash(curl -s -o /tmp/cs-audio.mp3 -w \"size=%{size_download} type=%{content_type}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/audio/test-audio-001.mp3\")",
+      "Read(//tmp/**)",
+      "Bash(curl -s -o /tmp/cs-video.mp4 -w \"size=%{size_download} type=%{content_type}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/videos/test-video-001.mp4\")"
     ]
   }
 }

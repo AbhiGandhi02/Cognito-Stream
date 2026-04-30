@@ -19,7 +19,7 @@ function getStatusColor(status: string) {
         case 'completed':
             return 'bg-success/20 text-success border-success/30';
         case 'processing':
-            return 'bg-primary-400/20 text-primary-300 border-primary-400/30 animate-pulse-glow';
+            return 'bg-primary-400/20 text-primary-300 border-primary-400/30 animate-pulse';
         case 'failed':
             return 'bg-danger/20 text-danger border-danger/30';
         default:

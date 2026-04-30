@@ -1,12 +1,13 @@
 @import "tailwindcss";
 
 /* ==========================================
-   CUSTOM THEME — Cognito Stream
-   Deep navy base + electric cyan & amber accents
+   COGNITO STREAM — design tokens
+   Direction: minimal, neutral surfaces, single cyan accent.
+   No glassmorphism / blur. No gradient overload. One animation.
    ========================================== */
 
 @theme {
-  /* Primary - Electric Cyan */
+  /* Primary — Cyan (the only ornamental color) */
   --color-primary-50: #ecfeff;
   --color-primary-100: #cffafe;
   --color-primary-200: #a5f3fc;
@@ -18,40 +19,25 @@
   --color-primary-800: #155e75;
   --color-primary-900: #164e63;
 
-  /* Accent - Warm Amber */
-  --color-amber-50: #fffbeb;
-  --color-amber-100: #fef3c7;
-  --color-amber-200: #fde68a;
-  --color-amber-300: #fcd34d;
-  --color-amber-400: #fbbf24;
-  --color-amber-500: #f59e0b;
-  --color-amber-600: #d97706;
+  /* Surface — near-black with subtle blue undertone */
+  --color-navy-50:  #f1f4f9;
+  --color-navy-100: #d8dde8;
+  --color-navy-200: #b1b9ca;
+  --color-navy-300: #8b95ab;
+  --color-navy-400: #64708d;
+  --color-navy-500: #4a5470;
+  --color-navy-600: #353d52;
+  --color-navy-700: #232a3c;
+  --color-navy-800: #161c2c;
+  --color-navy-900: #0e1320;
+  --color-navy-950: #080b14;
 
-  /* Surface - Deep Navy */
-  --color-navy-50: #f0f4ff;
-  --color-navy-100: #dbe4ff;
-  --color-navy-200: #bac8ff;
-  --color-navy-300: #91a7ff;
-  --color-navy-400: #5c7cfa;
-  --color-navy-500: #4263eb;
-  --color-navy-600: #364cd4;
-  --color-navy-700: #1e2a4a;
-  --color-navy-800: #141d33;
-  --color-navy-900: #0c1322;
-  --color-navy-950: #070b14;
-
-  /* Status */
-  --color-success: #34d399;
-  --color-danger: #fb7185;
-  --color-warning: #fbbf24;
-  --color-info: #38bdf8;
+  /* Status — kept narrow */
+  --color-success: #10b981;
+  --color-danger:  #f43f5e;
+  --color-warning: #f59e0b;
+  --color-info:    #38bdf8;
 }
-
-/* ==========================================
-   GLOBAL STYLES
-   ========================================== */
-
-/* Google Fonts loaded via index.html */
 
 html {
   scroll-behavior: smooth;
@@ -59,18 +45,21 @@ html {
 
 body {
   background-color: var(--color-navy-950);
-  color: #e2e8f0;
+  color: #d4d8e1;
   font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
 }
 
 /* ==========================================
-   SCROLLBAR
+   SCROLLBAR — thin & quiet
    ========================================== */
 
 ::-webkit-scrollbar {
-  width: 5px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -78,48 +67,50 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1e2a4a;
-  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-primary-500);
+  background: rgba(255, 255, 255, 0.15);
 }
 
 /* ==========================================
-   GLASSMORPHISM
+   SURFACES
+   No blur, no gradient — just neutral semi-transparent
+   panels with hairline borders. Names kept for backward
+   compatibility with existing components.
    ========================================== */
 
 .glass {
-  background: rgba(12, 19, 34, 0.7);
-  backdrop-filter: blur(16px);
-  border: 1px solid rgba(34, 211, 238, 0.08);
+  background: rgba(255, 255, 255, 0.015);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .glass-light {
-  background: rgba(20, 29, 51, 0.5);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(34, 211, 238, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .glass-card {
-  background: rgba(14, 21, 38, 0.6);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(34, 211, 238, 0.1);
-  transition: all 0.3s ease;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
 .glass-card:hover {
-  border-color: rgba(34, 211, 238, 0.2);
-  box-shadow: 0 0 30px rgba(6, 182, 212, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.12);
 }
 
 /* ==========================================
-   TEXT UTILITIES
+   TEXT
+   gradient-text now uses a single cyan ramp instead
+   of the old cyan→amber. One accent.
    ========================================== */
 
 .gradient-text {
-  background: linear-gradient(135deg, var(--color-primary-300), var(--color-amber-400));
+  background: linear-gradient(135deg, var(--color-primary-200), var(--color-primary-500));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -133,128 +124,81 @@ body {
 }
 
 /* ==========================================
-   BUTTON STYLES
+   BUTTONS
+   Solid fills, narrower padding, restrained shadows.
    ========================================== */
 
 .btn-primary {
-  background: linear-gradient(135deg, var(--color-primary-500), var(--color-primary-600));
+  background: var(--color-primary-500);
   color: white;
-  padding: 0.75rem 2rem;
-  border-radius: 0.75rem;
-  font-weight: 600;
-  transition: all 0.3s ease;
-  box-shadow: 0 4px 20px rgba(6, 182, 212, 0.25);
+  padding: 0.625rem 1.25rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  transition: background-color 0.15s ease;
 }
 
-.btn-primary:hover {
-  background: linear-gradient(135deg, var(--color-primary-400), var(--color-primary-500));
-  box-shadow: 0 6px 30px rgba(6, 182, 212, 0.35);
-  transform: translateY(-1px);
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-400);
 }
 
 .btn-primary:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: not-allowed;
-  transform: none;
 }
 
 .btn-secondary {
-  background: rgba(34, 211, 238, 0.08);
-  color: var(--color-primary-300);
-  padding: 0.75rem 2rem;
-  border-radius: 0.75rem;
-  font-weight: 600;
-  border: 1px solid rgba(34, 211, 238, 0.15);
-  transition: all 0.3s ease;
+  background: transparent;
+  color: #d4d8e1;
+  padding: 0.625rem 1.25rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
-.btn-secondary:hover {
-  background: rgba(34, 211, 238, 0.15);
-  border-color: rgba(34, 211, 238, 0.3);
+.btn-secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 /* ==========================================
    ANIMATIONS
+   Just the loading shimmer. Removed the float / glow /
+   pulse-glow ornaments — they were visual noise.
    ========================================== */
 
-@keyframes pulse-glow {
-
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.4);
-  }
-
-  50% {
-    box-shadow: 0 0 20px 4px rgba(6, 182, 212, 0.2);
-  }
-}
-
-.animate-pulse-glow {
-  animation: pulse-glow 2s ease-in-out infinite;
-}
-
 @keyframes shimmer {
-  0% {
-    background-position: -200% 0;
-  }
-
-  100% {
-    background-position: 200% 0;
-  }
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
 }
 
 .skeleton {
-  background: linear-gradient(90deg, #1e2a4a 25%, #2a3a5c 50%, #1e2a4a 75%);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 25%,
+    rgba(255, 255, 255, 0.08) 50%,
+    rgba(255, 255, 255, 0.04) 75%
+  );
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
 }
 
-@keyframes float {
-
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-
-  50% {
-    transform: translateY(-10px);
-  }
-}
-
-.animate-float {
-  animation: float 6s ease-in-out infinite;
-}
-
-@keyframes glow-pulse {
-
-  0%,
-  100% {
-    opacity: 0.4;
-  }
-
-  50% {
-    opacity: 0.8;
-  }
-}
-
-.animate-glow-pulse {
-  animation: glow-pulse 3s ease-in-out infinite;
-}
-
 /* ==========================================
    HERO BACKGROUND
+   One soft cyan glow at the top. No mesh.
    ========================================== */
 
 .hero-gradient {
-  background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(6, 182, 212, 0.15) 0%, transparent 50%),
-    radial-gradient(ellipse 60% 40% at 80% 50%, rgba(245, 158, 11, 0.08) 0%, transparent 50%),
+  background:
+    radial-gradient(ellipse 60% 40% at 50% 0%, rgba(6, 182, 212, 0.08) 0%, transparent 60%),
     var(--color-navy-950);
 }
 
 .mesh-gradient {
-  background:
-    radial-gradient(at 27% 37%, rgba(6, 182, 212, 0.12) 0px, transparent 50%),
-    radial-gradient(at 97% 21%, rgba(245, 158, 11, 0.08) 0px, transparent 50%),
-    radial-gradient(at 52% 99%, rgba(34, 211, 238, 0.06) 0px, transparent 50%),
-    radial-gradient(at 10% 29%, rgba(6, 182, 212, 0.05) 0px, transparent 50%);
+  background: var(--color-navy-950);
 }

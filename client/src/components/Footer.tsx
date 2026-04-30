@@ -1,32 +1,26 @@
 /**
- * Footer — site footer with brand, links, and credits.
+ * Footer — minimal site footer. Single line on desktop, stacked on mobile.
  */
-
-import { Sparkles } from 'lucide-react';
 
 export function Footer() {
     return (
-        <footer className="relative border-t border-white/5 py-12 px-6">
-            <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
-                {/* Brand */}
-                <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center">
-                        <Sparkles className="w-4 h-4 text-white" />
+        <footer className="border-t border-white/5 py-8 px-6">
+            <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
+                <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 rounded-md bg-primary-500/15 border border-primary-500/30 flex items-center justify-center">
+                        <span className="text-primary-300 text-[10px] font-semibold">C</span>
                     </div>
-                    <span className="font-semibold text-slate-300">Cognito Stream</span>
+                    <span className="text-slate-400">Cognito Stream</span>
+                    <span className="text-slate-600">·</span>
+                    <span>&copy; {new Date().getFullYear()}</span>
                 </div>
 
-                {/* Links */}
-                <div className="flex items-center gap-6 text-sm text-slate-500">
-                    <a href="#features" className="hover:text-primary-300 transition-colors">Features</a>
-                    <a href="#how-it-works" className="hover:text-primary-300 transition-colors">How It Works</a>
-                    <a href="/dashboard" className="hover:text-primary-300 transition-colors">Dashboard</a>
+                <div className="flex items-center gap-5">
+                    <a href="#features" className="hover:text-slate-200 transition-colors">Features</a>
+                    <a href="#examples" className="hover:text-slate-200 transition-colors">Examples</a>
+                    <a href="#how-it-works" className="hover:text-slate-200 transition-colors">How it works</a>
+                    <a href="/dashboard" className="hover:text-slate-200 transition-colors">Dashboard</a>
                 </div>
-
-                {/* Credits */}
-                <p className="text-xs text-slate-600">
-                    &copy; {new Date().getFullYear()} Cognito Stream. Powered by AI.
-                </p>
             </div>
         </footer>
     );

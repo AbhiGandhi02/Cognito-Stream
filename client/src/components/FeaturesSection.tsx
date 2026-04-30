@@ -1,6 +1,10 @@
 /**
- * FeaturesSection — animated feature cards grid showcasing platform capabilities.
- * Cards animate in on scroll using framer-motion.
+ * FeaturesSection — minimal grid of capabilities. Single accent color,
+ * no gradient icon tiles, plain icons inline with the title.
+ *
+ * Updated to reflect actual current pipeline: AI storyboarding, Manim
+ * rendering, Piper TTS narration, scene-level editing/iteration,
+ * automatic assembly, and Gemini→Groq fallback.
  */
 
 import { motion } from 'framer-motion';
@@ -9,109 +13,79 @@ import {
     Mic,
     Film,
     PenTool,
-    Download,
-    Eye,
+    Layers,
+    Shuffle,
 } from 'lucide-react';
 
 const features = [
     {
         icon: Brain,
-        title: 'AI Storyboard Generation',
-        description: 'Gemini AI transforms your text prompts into structured, multi-scene storyboards with narration and visual details.',
-        color: 'from-primary-400 to-primary-600',
-        glow: 'primary',
-    },
-    {
-        icon: Mic,
-        title: 'Voice Narration',
-        description: 'ElevenLabs text-to-speech generates natural, human-like voiceovers for every scene automatically.',
-        color: 'from-amber-400 to-amber-600',
-        glow: 'amber',
+        title: 'AI storyboard generation',
+        description: 'Your prompt becomes a multi-scene plan with narration and visual descriptions.',
     },
     {
         icon: Film,
-        title: '2D Manim Animations',
-        description: 'Professional mathematical and educational animations rendered using the Manim engine in real-time.',
-        color: 'from-emerald-400 to-emerald-600',
-        glow: 'emerald',
+        title: '2D Manim animations',
+        description: 'Generated Python is executed in a sandboxed renderer with auto-correction on failure.',
+    },
+    {
+        icon: Mic,
+        title: 'Local voice narration',
+        description: 'Piper TTS runs in-process — no external API key, no quota.',
     },
     {
         icon: PenTool,
-        title: 'Scene-Level Editing',
-        description: 'Edit narration, visual descriptions, and Manim code for each scene individually before rendering.',
-        color: 'from-violet-400 to-violet-600',
-        glow: 'violet',
+        title: 'Review & iterate per scene',
+        description: 'Inspect generated code, tweak narration, regenerate just the scene that’s off.',
     },
     {
-        icon: Download,
-        title: 'Auto Video Assembly',
-        description: 'Scenes are automatically assembled into a final video with synced audio and smooth transitions.',
-        color: 'from-rose-400 to-rose-600',
-        glow: 'rose',
+        icon: Layers,
+        title: 'Auto video assembly',
+        description: 'Scene videos and audio are stitched into one final mp4 you can download.',
     },
     {
-        icon: Eye,
-        title: 'Real-Time Preview',
-        description: 'Preview individual scenes and the final assembled video directly in the browser with custom controls.',
-        color: 'from-sky-400 to-sky-600',
-        glow: 'sky',
+        icon: Shuffle,
+        title: 'LLM fallback',
+        description: 'Gemini first, Groq when quota or upstream issues hit. Renders never block on a single provider.',
     },
 ];
 
-const glowMap: Record<string, string> = {
-    primary: 'rgba(6, 182, 212, 0.08)',
-    amber: 'rgba(245, 158, 11, 0.08)',
-    emerald: 'rgba(52, 211, 153, 0.08)',
-    violet: 'rgba(139, 92, 246, 0.08)',
-    rose: 'rgba(251, 113, 133, 0.08)',
-    sky: 'rgba(56, 189, 248, 0.08)',
-};
-
 export function FeaturesSection() {
     return (
-        <section id="features" className="relative py-24 px-6">
-            <div className="max-w-6xl mx-auto">
+        <section id="features" className="relative py-28 px-6">
+            <div className="max-w-5xl mx-auto">
                 {/* Heading */}
                 <motion.div
-                    initial={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 12 }}
                     whileInView={{ opacity: 1, y: 0 }}
                     viewport={{ once: true, margin: '-80px' }}
-                    transition={{ duration: 0.5 }}
-                    className="text-center mb-16"
+                    transition={{ duration: 0.4 }}
+                    className="max-w-xl mb-16"
                 >
-                    <h2 className="text-3xl md:text-5xl font-bold mb-4">
-                        <span className="gradient-text">Powerful</span>{' '}
-                        <span className="text-slate-200">Features</span>
-                    </h2>
-                    <p className="text-lg text-slate-400 max-w-2xl mx-auto">
-                        Everything you need to turn a text prompt into a narrated, animated educational video.
+                    <p className="text-xs uppercase tracking-widest text-primary-400 font-medium mb-3">
+                        What it does
                     </p>
+                    <h2 className="text-3xl md:text-4xl font-semibold tracking-tight text-slate-100">
+                        Everything from prompt to playable video
+                    </h2>
                 </motion.div>
 
-                {/* Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {/* Grid — flat layout, no card surfaces */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-10 gap-y-12">
                     {features.map((feature, i) => (
                         <motion.div
                             key={feature.title}
-                            initial={{ opacity: 0, y: 30 }}
+                            initial={{ opacity: 0, y: 16 }}
                             whileInView={{ opacity: 1, y: 0 }}
-                            viewport={{ once: true, margin: '-60px' }}
-                            transition={{ duration: 0.4, delay: i * 0.08 }}
-                            className="glass-card rounded-2xl p-6 group cursor-default"
-                            style={{
-                                ['--hover-glow' as string]: glowMap[feature.glow],
-                            }}
+                            viewport={{ once: true, margin: '-40px' }}
+                            transition={{ duration: 0.35, delay: i * 0.06 }}
+                            className="space-y-3"
                         >
-                            {/* Icon */}
-                            <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${feature.color} flex items-center justify-center mb-4 shadow-lg group-hover:scale-110 transition-transform duration-300`}>
-                                <feature.icon className="w-6 h-6 text-white" />
-                            </div>
-
-                            {/* Text */}
-                            <h3 className="text-lg font-semibold text-slate-100 mb-2">
+                            <feature.icon className="w-5 h-5 text-primary-400" strokeWidth={1.75} />
+                            <h3 className="text-sm font-medium text-slate-200">
                                 {feature.title}
                             </h3>
-                            <p className="text-sm text-slate-400 leading-relaxed">
+                            <p className="text-sm text-slate-500 leading-relaxed">
                                 {feature.description}
                             </p>
                         </motion.div>

@@ -42,6 +42,72 @@ VOICES_DIR.mkdir(exist_ok=True, parents=True)
 # Override via DEFAULT_RENDER_QUALITY env or by passing 'quality' in the request body.
 DEFAULT_RENDER_QUALITY = os.getenv('DEFAULT_RENDER_QUALITY', 'low')
 
+# ==========================================
+# CLOUD STORAGE (Supabase)
+# ==========================================
+# When SUPABASE_SERVICE_ROLE_KEY is set, finished mp4/mp3 files are uploaded
+# to a Supabase Storage bucket and the renderer returns the public URL. When
+# unset (local dev), files stay on /app/output and /app/audio and the
+# renderer returns relative `/videos/...` and `/audio/...` paths as before.
+SUPABASE_URL = os.getenv('SUPABASE_URL', '').rstrip('/')
+SUPABASE_SERVICE_ROLE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY', '')
+SUPABASE_BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET', 'cognito-stream')
+USE_CLOUD_STORAGE = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+_supabase_client = None
+
+def _get_supabase():
+    """Lazy-init the Supabase client. Only called when USE_CLOUD_STORAGE is True."""
+    global _supabase_client
+    if _supabase_client is None:
+        from supabase import create_client
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return _supabase_client
+
+def upload_to_storage(local_path, storage_path, content_type):
+    """
+    Upload a local file to Supabase Storage and return its public URL.
+    If cloud storage isn't configured, returns None so the caller can fall
+    back to a relative path.
+    """
+    if not USE_CLOUD_STORAGE:
+        return None
+    client = _get_supabase()
+    # Remove any existing object first so re-renders overwrite cleanly.
+    try:
+        client.storage.from_(SUPABASE_BUCKET).remove([storage_path])
+    except Exception:
+        pass
+    with open(local_path, 'rb') as fh:
+        client.storage.from_(SUPABASE_BUCKET).upload(
+            path=storage_path,
+            file=fh.read(),
+            file_options={'content-type': content_type, 'upsert': 'true'},
+        )
+    public_url = client.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
+    return public_url.rstrip('/')
+
+def download_to_local(url_or_path, dest_dir):
+    """
+    Resolve a videoUrl/audioUrl to a local file path. If it's a full URL
+    (starts with http), download it. If it's a relative path, treat it as
+    living under /app/output or /app/audio. Returns the path on disk that
+    ffmpeg can read.
+    """
+    if url_or_path.startswith('http://') or url_or_path.startswith('https://'):
+        filename = url_or_path.rstrip('/').split('/')[-1].split('?')[0]
+        local_path = Path(dest_dir) / filename
+        with urllib.request.urlopen(url_or_path, timeout=60) as resp:
+            local_path.write_bytes(resp.read())
+        return str(local_path)
+    # Relative path like /videos/foo.mp4 — strip the leading bucket prefix.
+    if url_or_path.startswith('/videos/'):
+        return str(OUTPUT_DIR / url_or_path[len('/videos/'):])
+    if url_or_path.startswith('/audio/'):
+        return str(AUDIO_DIR / url_or_path[len('/audio/'):])
+    # Bare filename — try output dir first.
+    return str(OUTPUT_DIR / url_or_path)
+
 # Piper TTS voice — auto-downloaded on first request if not pre-baked into image.
 # Voice name format: <locale>-<speaker>-<quality>, e.g. en_GB-jenny_dioco-medium.
 # Browse voices: https://huggingface.co/rhasspy/piper-voices/tree/main
@@ -598,13 +664,21 @@ def render_scene():
         
         # Get video info
         video_duration = get_video_duration(video_path)
-        
+
         # Cleanup scene file
         scene_file.unlink()
-        
+
+        # Upload to Supabase if configured.
+        public_url = upload_to_storage(
+            local_path=str(video_path),
+            storage_path=f'videos/{scene_id}.mp4',
+            content_type='video/mp4',
+        )
+        video_url = public_url or f'/videos/{scene_id}.mp4'
+
         return jsonify({
             'success': True,
-            'videoUrl': f'/videos/{scene_id}.mp4',
+            'videoUrl': video_url,
             'sceneId': scene_id,
             'duration': video_duration,
             'renderTime': round(render_time, 2)
@@ -879,19 +953,28 @@ def render_full_code():
         
         # Get video info
         video_duration = get_video_duration(output_file)
-        
+
         # Cleanup temp directory
         if job_dir.exists():
             shutil.rmtree(job_dir, ignore_errors=True)
-        
+
         stats['successful_renders'] += 1
         stats['total_render_time'] += render_time
-        
+
         logger.info(f"✓ Code render complete: {scene_id} ({render_time:.2f}s)")
-        
+
+        # Upload to Supabase Storage if configured. Falls back to local path
+        # in dev mode when SUPABASE_SERVICE_ROLE_KEY isn't set.
+        public_url = upload_to_storage(
+            local_path=str(output_file),
+            storage_path=f'videos/{scene_id}.mp4',
+            content_type='video/mp4',
+        )
+        video_url = public_url or f'/videos/{scene_id}.mp4'
+
         return jsonify({
             'success': True,
-            'videoUrl': f'/videos/{scene_id}.mp4',
+            'videoUrl': video_url,
             'sceneId': scene_id,
             'duration': video_duration,
             'renderTime': round(render_time, 2)
@@ -932,77 +1015,81 @@ def assemble_video():
         
         logger.info(f"🎞️  Assembling video for: {storyboard_id}")
         logger.info(f"Scenes to assemble: {len(scenes)}")
-        
-        # Collect video paths (stitch audio if available)
+
+        # Working dir for downloaded inputs and intermediate stitched files.
+        work_dir = TEMP_DIR / f'assemble_{storyboard_id}_{int(time.time())}'
+        work_dir.mkdir(parents=True, exist_ok=True)
+
         video_paths = []
         total_duration = 0
-        
-        for scene in scenes:
-            # Extract scene video filename from URL
-            video_url = scene.get('videoUrl', '')
-            if '/videos/' in video_url:
-                filename = video_url.split('/videos/')[-1]
-            else:
-                filename = f"{scene.get('sceneNumber', 'unknown')}.mp4"
-            
-            video_path = OUTPUT_DIR / filename
-            
-            if not video_path.exists():
-                logger.warning(f"Video not found: {video_path}")
-                continue
-            
-            # Check if this scene has audio to stitch
-            audio_url = scene.get('audioUrl', '')
-            if audio_url:
+
+        try:
+            for scene in scenes:
+                video_url = scene.get('videoUrl', '')
+                audio_url = scene.get('audioUrl', '')
+
+                # Resolve videoUrl → local path (download if cloud URL).
                 try:
-                    # Audio is stored in the shared volume at /app/audio/
-                    audio_filename = audio_url.split('/')[-1] if '/' in audio_url else audio_url
-                    audio_path = AUDIO_DIR / audio_filename
-                    
-                    if audio_path.exists():
-                        # Stitch audio into the video
-                        stitched_path = OUTPUT_DIR / f"{video_path.stem}_with_audio.mp4"
-                        stitch_audio_video(video_path, audio_path, stitched_path)
-                        video_paths.append(stitched_path)
-                        logger.info(f"✓ Stitched audio into scene {scene.get('sceneNumber')}")
-                    else:
-                        logger.warning(f"Audio file not found: {audio_path}, using video without audio")
+                    video_path = Path(download_to_local(video_url, work_dir))
+                except Exception as e:
+                    logger.warning(f"Could not fetch video for scene {scene.get('sceneNumber')}: {e}")
+                    continue
+                if not video_path.exists():
+                    logger.warning(f"Video not found after fetch: {video_path}")
+                    continue
+
+                # Stitch audio if provided.
+                if audio_url:
+                    try:
+                        audio_path = Path(download_to_local(audio_url, work_dir))
+                        if audio_path.exists():
+                            stitched_path = work_dir / f"{video_path.stem}_with_audio.mp4"
+                            stitch_audio_video(video_path, audio_path, stitched_path)
+                            video_paths.append(stitched_path)
+                            logger.info(f"✓ Stitched audio into scene {scene.get('sceneNumber')}")
+                        else:
+                            logger.warning(f"Audio file missing after fetch: {audio_path}")
+                            video_paths.append(video_path)
+                    except Exception as stitch_err:
+                        logger.error(f"Audio stitch failed for scene {scene.get('sceneNumber')}: {stitch_err}")
                         video_paths.append(video_path)
-                except Exception as stitch_err:
-                    logger.error(f"Audio stitch failed for scene {scene.get('sceneNumber')}: {stitch_err}")
-                    video_paths.append(video_path)  # Fallback: use video without audio
-            else:
-                video_paths.append(video_path)
-            
-            total_duration += scene.get('duration', 0)
-        
-        if not video_paths:
-            return jsonify({
-                'success': False,
-                'error': 'No valid video files found'
-            }), 400
-        
-        # Concatenate all videos (with audio already stitched)
-        output_file = OUTPUT_DIR / f'{storyboard_id}_final.mp4'
-        concatenate_videos(video_paths, output_file)
-        
-        # Cleanup temporary stitched files
-        for vpath in video_paths:
-            if '_with_audio' in str(vpath) and vpath.exists():
-                try:
-                    vpath.unlink()
-                except Exception:
-                    pass
-        
-        # Verify output
-        final_duration = get_video_duration(output_file)
-        
-        logger.info(f"✓ Final video assembled: {output_file}")
-        logger.info(f"Total duration: {final_duration}s")
-        
+                else:
+                    video_paths.append(video_path)
+
+                total_duration += scene.get('duration', 0)
+
+            if not video_paths:
+                return jsonify({
+                    'success': False,
+                    'error': 'No valid video files found'
+                }), 400
+
+            # Concat all stitched per-scene videos into the final mp4.
+            output_file = work_dir / f'{storyboard_id}_final.mp4'
+            concatenate_videos(video_paths, output_file)
+
+            final_duration = get_video_duration(output_file)
+            logger.info(f"✓ Final video assembled: {output_file}")
+            logger.info(f"Total duration: {final_duration}s")
+
+            # Move to OUTPUT_DIR (so local-mode frontend can still serve it via
+            # /videos static route) AND upload to Supabase if configured.
+            persistent_path = OUTPUT_DIR / f'{storyboard_id}_final.mp4'
+            shutil.copy(str(output_file), str(persistent_path))
+
+            public_url = upload_to_storage(
+                local_path=str(persistent_path),
+                storage_path=f'videos/{storyboard_id}_final.mp4',
+                content_type='video/mp4',
+            )
+            video_url = public_url or f'/videos/{storyboard_id}_final.mp4'
+        finally:
+            # Always clean up the working dir (downloads + stitched intermediates).
+            shutil.rmtree(work_dir, ignore_errors=True)
+
         return jsonify({
             'success': True,
-            'videoUrl': f'/videos/{storyboard_id}_final.mp4',
+            'videoUrl': video_url,
             'storyboardId': storyboard_id,
             'totalDuration': final_duration,
             'scenesCount': len(video_paths)
@@ -1060,9 +1147,17 @@ def text_to_speech():
 
         logger.info(f"✅ TTS complete: {mp3_path.name} ({duration}s, took {elapsed}s)")
 
+        # Upload mp3 to Supabase Storage if configured.
+        public_url = upload_to_storage(
+            local_path=str(mp3_path),
+            storage_path=f'audio/{scene_id}.mp3',
+            content_type='audio/mpeg',
+        )
+        audio_url = public_url or f'/audio/{scene_id}.mp3'
+
         return jsonify({
             'success': True,
-            'audioUrl': f'/audio/{scene_id}.mp3',
+            'audioUrl': audio_url,
             'sceneId': scene_id,
             'duration': duration,
             'characterCount': len(text),

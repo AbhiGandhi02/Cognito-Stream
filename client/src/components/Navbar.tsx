@@ -1,16 +1,21 @@
 /**
- * Navbar — sticky top navigation for the landing page.
- * Scroll-aware: transparent at top, solid on scroll.
+ * Navbar — minimal sticky nav. Quiet by default; gains a hairline border
+ * when the user scrolls past the hero. Single-letter mark, no gradient
+ * brand box.
  */
 
 import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Sparkles, Menu, X } from 'lucide-react';
+import { Menu, X, LogOut, Shield } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import { useMe } from '../hooks/useMe';
 
 export function Navbar() {
     const [scrolled, setScrolled] = useState(false);
     const [mobileOpen, setMobileOpen] = useState(false);
     const navigate = useNavigate();
+    const { session, user, signOut } = useAuth();
+    const { isAdmin } = useMe();
 
     useEffect(() => {
         const handle = () => setScrolled(window.scrollY > 20);
@@ -20,70 +25,108 @@ export function Navbar() {
 
     const navLinks = [
         { label: 'Features', href: '#features' },
-        { label: 'How It Works', href: '#how-it-works' },
+        { label: 'Examples', href: '#examples' },
+        { label: 'How it works', href: '#how-it-works' },
     ];
 
     return (
         <nav
-            className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${scrolled
-                    ? 'glass shadow-lg shadow-black/20'
-                    : 'bg-transparent'
+            className={`fixed top-0 left-0 right-0 z-50 transition-colors duration-200 ${scrolled
+                ? 'border-b border-white/5 bg-navy-950/85 backdrop-blur-md'
+                : 'bg-transparent'
                 }`}
         >
-            <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-                {/* Brand */}
-                <Link to="/" className="flex items-center gap-3 group">
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center shadow-lg shadow-primary-500/25 group-hover:shadow-primary-500/40 transition-shadow">
-                        <Sparkles className="w-5 h-5 text-white" />
+            <div className="max-w-6xl mx-auto px-6 py-3.5 flex items-center justify-between">
+                {/* Brand — wordmark only */}
+                <Link to="/" className="flex items-center gap-2 group">
+                    <div className="w-7 h-7 rounded-md bg-primary-500/15 border border-primary-500/30 flex items-center justify-center">
+                        <span className="text-primary-300 text-sm font-semibold">C</span>
                     </div>
-                    <div>
-                        <h1 className="text-lg font-bold tracking-tight gradient-text">
-                            Cognito Stream
-                        </h1>
-                        <p className="text-[10px] text-slate-400 -mt-0.5 uppercase tracking-widest">
-                            AI Video Engine
-                        </p>
-                    </div>
+                    <span className="text-sm font-medium text-slate-200 tracking-tight">
+                        Cognito Stream
+                    </span>
                 </Link>
 
                 {/* Desktop links */}
-                <div className="hidden md:flex items-center gap-8">
+                <div className="hidden md:flex items-center gap-1">
                     {navLinks.map((link) => (
                         <a
                             key={link.href}
                             href={link.href}
-                            className="text-sm text-slate-400 hover:text-primary-300 transition-colors font-medium"
+                            className="text-sm text-slate-400 hover:text-slate-100 transition-colors px-3 py-1.5 rounded-md"
                         >
                             {link.label}
                         </a>
                     ))}
-                    <button
-                        onClick={() => navigate('/dashboard')}
-                        className="btn-primary text-sm px-6 py-2.5"
-                    >
-                        Get Started
-                    </button>
+                    {session ? (
+                        <div className="ml-3 flex items-center gap-2">
+                            <span className="text-xs text-slate-500 max-w-40 truncate" title={user?.email ?? ''}>
+                                {user?.email}
+                            </span>
+                            {isAdmin && (
+                                <button
+                                    onClick={() => navigate('/admin')}
+                                    className="btn-secondary text-sm flex items-center gap-1.5"
+                                    title="Admin dashboard"
+                                >
+                                    <Shield className="w-3.5 h-3.5" />
+                                    Admin
+                                </button>
+                            )}
+                            <button
+                                onClick={() => navigate('/dashboard')}
+                                className="btn-primary text-sm"
+                            >
+                                Dashboard
+                            </button>
+                            <button
+                                onClick={async () => {
+                                    await signOut();
+                                    navigate('/');
+                                }}
+                                className="btn-secondary text-sm flex items-center gap-1.5"
+                                title="Sign out"
+                            >
+                                <LogOut className="w-3.5 h-3.5" />
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="ml-3 flex items-center gap-2">
+                            <button
+                                onClick={() => navigate('/login')}
+                                className="btn-secondary text-sm"
+                            >
+                                Sign in
+                            </button>
+                            <button
+                                onClick={() => navigate('/signup')}
+                                className="btn-primary text-sm"
+                            >
+                                Get started
+                            </button>
+                        </div>
+                    )}
                 </div>
 
                 {/* Mobile toggle */}
                 <button
-                    className="md:hidden text-slate-300 hover:text-white transition-colors"
+                    className="md:hidden text-slate-300 hover:text-slate-100 transition-colors"
                     onClick={() => setMobileOpen(!mobileOpen)}
                     aria-label="Toggle menu"
                 >
-                    {mobileOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+                    {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
                 </button>
             </div>
 
             {/* Mobile menu */}
             {mobileOpen && (
-                <div className="md:hidden glass-light border-t border-white/5 px-6 py-4 space-y-3">
+                <div className="md:hidden border-t border-white/5 px-6 py-4 space-y-1 bg-navy-950/95 backdrop-blur-md">
                     {navLinks.map((link) => (
                         <a
                             key={link.href}
                             href={link.href}
                             onClick={() => setMobileOpen(false)}
-                            className="block text-sm text-slate-400 hover:text-primary-300 transition-colors py-2"
+                            className="block text-sm text-slate-400 hover:text-slate-100 transition-colors py-2"
                         >
                             {link.label}
                         </a>
@@ -93,9 +136,9 @@ export function Navbar() {
                             setMobileOpen(false);
                             navigate('/dashboard');
                         }}
-                        className="btn-primary w-full text-sm py-2.5 text-center"
+                        className="btn-primary w-full text-sm mt-3"
                     >
-                        Get Started
+                        Open dashboard
                     </button>
                 </div>
             )}

@@ -21,6 +21,12 @@ services:
       - AUDIO_DIR=/app/audio
       - DEBUG=true
       - FLASK_ENV=development
+      # Cloud storage (optional — leave empty to render to local disk only).
+      # When all three are set, renderer uploads finished mp4/mp3 to Supabase
+      # Storage and returns the public URL instead of /videos/... or /audio/...
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
+      - SUPABASE_STORAGE_BUCKET=${SUPABASE_STORAGE_BUCKET:-cognito-stream}
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:5000/health" ]

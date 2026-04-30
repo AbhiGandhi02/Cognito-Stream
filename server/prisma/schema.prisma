@@ -5,61 +5,89 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql" // Can use "sqlite" for local development
+  provider = "postgresql"
+  // The IDE flags `url` as deprecated (Prisma 7 rules), but the installed
+  // Prisma 5.22 REQUIRES this line for `prisma migrate`. Leave it.
+  url      = env("DATABASE_URL")
 }
 
 model Storyboard {
   id              String   @id @default(cuid())
+  // Supabase auth user id (UUID from auth.users). Nullable for legacy rows
+  // that pre-date auth; new rows must always be authored.
+  userId          String?  @db.Uuid
   title           String
   description     String
   prompt          String   @db.Text
   status          String   @default("draft") // draft, processing, completed, failed
   finalVideoUrl   String?
   totalDuration   Float?
-  
+  // Top-level error captured when storyboard generation itself fails (e.g.
+  // Gemini outage during initial scene-planning). Per-scene errors live
+  // on the Scene rows.
+  errorMessage    String?  @db.Text
+
   scenes          Scene[]
-  
+  user            User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-  
+
   @@index([createdAt])
+  @@index([userId])
 }
 
 model Scene {
   id                  String      @id @default(cuid())
   storyboardId        String
   sceneNumber         Int
-  
+
   narration           String      @db.Text
   visualDescription   String      @db.Text
   manimCode           String      @db.Text // JSON string of Manim operations
-  
+
   estimatedDuration   Float
   actualDuration      Float?
-  
+
   audioUrl            String?
   videoUrl            String?
-  
+
   status              String      @default("pending") // pending, processing, completed, failed
-  
+  // Last error message encountered for this scene (rendering error, AI
+  // generation failure, etc.). Surfaces to admins for diagnostic view.
+  errorMessage        String?     @db.Text
+  // How many AI-driven correction attempts were made before the scene
+  // either succeeded or gave up. Useful signal for admins.
+  correctionAttempts  Int         @default(0)
+
   storyboard          Storyboard  @relation(fields: [storyboardId], references: [id], onDelete: Cascade)
-  
+
   createdAt           DateTime    @default(now())
   updatedAt           DateTime    @updatedAt
-  
+
   @@unique([storyboardId, sceneNumber])
   @@index([storyboardId])
   @@index([status])
 }
 
-// Optional: User model for future authentication
+enum Role {
+  USER
+  ADMIN
+}
+
+// User profile, mirrored from Supabase Auth.
+// `id` is the Supabase auth.users UUID (NOT a cuid — we don't auto-generate).
+// We upsert a row here on the first authenticated request from each user.
 model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
+  id            String       @id @db.Uuid
+  email         String       @unique
   name          String?
-  
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  role          Role         @default(USER)
+
+  storyboards   Storyboard[]
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 }
 
 // Optional: Render job queue for async processing

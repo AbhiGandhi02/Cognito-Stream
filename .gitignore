@@ -19,3 +19,6 @@ client/package-lock.json
 renderer/.mypy_cache/
 storage/
 
+# Claude Code MCP config — contains a Supabase access token, do not commit.
+.mcp.json
+

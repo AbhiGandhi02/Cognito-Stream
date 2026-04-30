@@ -18,6 +18,11 @@ pydub==0.25.1
 # Text-to-Speech (local, open-source)
 piper-tts==1.2.0
 
+# Supabase Storage client (for uploading rendered mp4/mp3 to cloud bucket).
+# Optional: if SUPABASE_SERVICE_ROLE_KEY is unset, the renderer falls back
+# to local filesystem and the import is unused.
+supabase==2.7.4
+
 # Production server
 gunicorn==21.2.0
 

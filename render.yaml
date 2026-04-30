@@ -1,0 +1,96 @@
+# Render.com deployment manifest.
+# Push this repo to GitHub, then in Render Dashboard → New + → Blueprint →
+# select your repo. Render reads this file and provisions both services.
+#
+# Env-var values left as `sync: false` MUST be set manually in the Render
+# dashboard for each service after the initial deploy.
+
+services:
+  # -----------------------------------------------------------------
+  # Node API server — Express + Prisma. Serves /api/* endpoints.
+  # -----------------------------------------------------------------
+  - type: web
+    name: cognito-stream-server
+    runtime: node
+    plan: starter            # $7/mo, 512MB RAM. Fine for the API.
+    region: oregon
+    rootDir: server
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: node dist/index.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+
+      # Hosted Postgres + auth secret — fill in via dashboard.
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+
+      # Renderer service — Render's private network DNS uses the service name.
+      - key: RENDERER_URL
+        value: http://cognito-stream-renderer:5000
+
+      # Public client URL for CORS allow-list. Vercel/Netlify URL of the SPA.
+      - key: CLIENT_URL
+        sync: false
+
+      # LLM keys.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_CODE_MODEL
+        value: gemini-2.5-flash
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+
+  # -----------------------------------------------------------------
+  # Manim renderer — Docker, Python + FFmpeg + LaTeX + Piper TTS.
+  # Marked as private — only the API server reaches it on the internal net.
+  # -----------------------------------------------------------------
+  - type: pserv               # private service (internal-only)
+    name: cognito-stream-renderer
+    runtime: image
+    plan: standard            # $25/mo, 2GB RAM, 1 CPU. Manim needs the RAM.
+    region: oregon
+    image:
+      url: docker://docker.io/library/python:3.11-slim   # placeholder — see notes below
+    # NOTE: Render's "image" runtime expects a pre-built image in a registry.
+    # For Dockerfile builds, change `runtime: image` → `runtime: docker` and
+    # add `dockerfilePath: Dockerfile` + `rootDir: renderer` (Render docker
+    # builds are in beta; alternatively push your own image to Docker Hub
+    # / GHCR and reference it here).
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 5000
+      - key: OUTPUT_DIR
+        value: /app/output
+      - key: TEMP_DIR
+        value: /app/temp
+      - key: AUDIO_DIR
+        value: /app/audio
+      - key: DEFAULT_RENDER_QUALITY
+        value: medium
+
+      # Cloud storage — fill in via dashboard.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: cognito-stream
+
+    # Disk for the brief moments before files are uploaded to Supabase.
+    # Without this, /tmp / /app/output get wiped on container restart.
+    disk:
+      name: renderer-data
+      mountPath: /app
+      sizeGB: 5

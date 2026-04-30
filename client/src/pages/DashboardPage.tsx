@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, type Storyboard, type Scene } from '../services/api';
 import { VideoPlayer } from '../components/VideoPlayer';
 import { ProgressBar } from '../components/ProgressBar';
+import { useMe } from '../hooks/useMe';
 // Editable per-scene UI (Monaco editor + textareas) — re-enable when individual scene editing is needed.
 // import { SceneCard } from '../components/SceneCard';
 import {
@@ -20,6 +21,8 @@ import {
     Film,
     Code as CodeIcon,
     CheckCircle2,
+    Plus,
+    History,
 } from 'lucide-react';
 
 export function DashboardPage() {
@@ -33,6 +36,7 @@ export function DashboardPage() {
     const [error, setError] = useState<string>();
     const [isConnected, setIsConnected] = useState(false);
     const navigate = useNavigate();
+    const { isAdmin } = useMe();
 
     // ==========================================
     // DATA FETCHING
@@ -198,11 +202,23 @@ export function DashboardPage() {
     const completedScenes = storyboard?.scenes.filter((s) => s.status === 'completed').length || 0;
     const totalScenes = storyboard?.scenes.length || 0;
     const progress = totalScenes > 0 ? (completedScenes / totalScenes) * 100 : 0;
-    const allScenesCompleted = completedScenes === totalScenes && totalScenes > 0;
 
     // ==========================================
     // RENDER
     // ==========================================
+
+    const statusDot = (status: string) => {
+        switch (status) {
+            case 'completed':
+                return 'bg-success shadow-sm shadow-success/50';
+            case 'processing':
+                return 'bg-warning shadow-sm shadow-warning/50 animate-pulse';
+            case 'failed':
+                return 'bg-danger shadow-sm shadow-danger/50';
+            default:
+                return 'bg-slate-600';
+        }
+    };
 
     return (
         <div className="min-h-screen bg-navy-950 text-slate-100 flex flex-col">
@@ -242,6 +258,60 @@ export function DashboardPage() {
                 </div>
             </header>
 
+            <div className="flex-1 flex min-h-0">
+                {/* ============== LEFT HISTORY SIDEBAR ============== */}
+                <aside className="w-64 shrink-0 border-r border-white/5 bg-navy-950/40 flex flex-col">
+                    <div className="px-4 py-4 border-b border-white/5">
+                        <button
+                            onClick={handleNewStoryboard}
+                            className="w-full flex items-center justify-center gap-2 rounded-xl bg-primary-500/15 hover:bg-primary-500/25 border border-primary-500/20 text-primary-200 text-sm font-medium py-2.5 transition-colors"
+                        >
+                            <Plus className="w-4 h-4" />
+                            New Project
+                        </button>
+                    </div>
+
+                    <div className="px-4 pt-4 pb-2 flex items-center gap-2">
+                        <History className="w-3.5 h-3.5 text-slate-500" />
+                        <h3 className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                            History
+                        </h3>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-1">
+                        {storyboards.length === 0 ? (
+                            <p className="px-2 py-3 text-xs text-slate-600 italic">
+                                No projects yet. Create your first one!
+                            </p>
+                        ) : (
+                            storyboards.map((sb) => (
+                                <button
+                                    key={sb.id}
+                                    onClick={() => handleSelectStoryboard(sb)}
+                                    className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors group ${storyboard?.id === sb.id
+                                        ? 'bg-primary-500/10 border border-primary-500/25'
+                                        : 'hover:bg-white/5 border border-transparent'
+                                        }`}
+                                >
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot(sb.status)}`} />
+                                        <span className={`text-xs font-medium truncate ${storyboard?.id === sb.id ? 'text-primary-200' : 'text-slate-300 group-hover:text-slate-100'
+                                            }`}>
+                                            {sb.title || 'Untitled'}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-[10px] text-slate-600 pl-3.5">
+                                        <span className="capitalize">{sb.status}</span>
+                                        <span>{sb.scenes?.length || 0} scenes</span>
+                                    </div>
+                                </button>
+                            ))
+                        )}
+                    </div>
+                </aside>
+
+                {/* ============== MAIN CONTENT ============== */}
+                <div className="flex-1 flex flex-col min-w-0">
             {!storyboard ? (
                 /* ====================== PROMPT VIEW ====================== */
                 <main className="flex-1 flex items-center justify-center px-4 py-16">
@@ -297,46 +367,25 @@ export function DashboardPage() {
                                 )}
                             </button>
 
-                            <button
-                                className="btn-secondary w-full flex items-center justify-center gap-2 py-2.5 text-sm"
-                                onClick={handleTestGenerate}
-                                disabled={loading}
-                            >
-                                <FlaskConical className="w-4 h-4" />
-                                Test Pipeline (No AI)
-                            </button>
+                            {/* Admin-only diagnostic — uses pre-baked Manim code, no LLM call.
+                                Hidden from regular users to keep the UI clean. */}
+                            {isAdmin && (
+                                <button
+                                    className="btn-secondary w-full flex items-center justify-center gap-2 py-2.5 text-sm"
+                                    onClick={handleTestGenerate}
+                                    disabled={loading}
+                                    title="Admin: render the hardcoded test storyboard without calling the LLM"
+                                >
+                                    <FlaskConical className="w-4 h-4" />
+                                    Test Pipeline (No AI)
+                                </button>
+                            )}
 
                             <p className="text-center text-[11px] text-slate-700">
                                 Press ⌘+Enter to generate
                             </p>
                         </div>
 
-                        {/* Recent projects */}
-                        {storyboards.length > 0 && (
-                            <div className="space-y-3">
-                                <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                                    Recent Projects
-                                </h3>
-                                <div className="grid gap-2">
-                                    {storyboards.slice(0, 5).map((sb) => (
-                                        <button
-                                            key={sb.id}
-                                            onClick={() => handleSelectStoryboard(sb)}
-                                            className="glass-card rounded-xl p-4 text-left group"
-                                        >
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-sm font-medium text-slate-300 group-hover:text-primary-300 transition-colors truncate">
-                                                    {sb.title || 'Untitled'}
-                                                </span>
-                                                <span className="text-[10px] text-slate-600">
-                                                    {sb.scenes?.length || 0} scenes
-                                                </span>
-                                            </div>
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
                     </div>
                 </main>
             ) : storyboard.status === 'draft' ? (
@@ -525,7 +574,7 @@ export function DashboardPage() {
                         </div>
 
                         {/* Progress bar while processing */}
-                        {(storyboard.status === 'processing' || storyboard.status === 'draft') && !storyboard.finalVideoUrl && (
+                        {storyboard.status === 'processing' && !storyboard.finalVideoUrl && (
                             <div className="glass-card rounded-2xl p-5 space-y-4">
                                 <div className="flex items-center gap-3">
                                     <RefreshCcw className="w-5 h-5 animate-spin text-primary-400" />
@@ -645,6 +694,8 @@ export function DashboardPage() {
                     </div>
                 </main>
             )}
+                </div>
+            </div>
         </div>
     );
 }

@@ -22,16 +22,15 @@ function ExampleCard({ video, onPlay }: { video: ExampleVideo; onPlay: (v: Examp
             onClick={() => onPlay(video)}
             className="group relative text-left rounded-2xl overflow-hidden border border-primary-500/10 hover:border-primary-500/30 bg-navy-900/50 transition-all hover:-translate-y-1 hover:shadow-xl hover:shadow-primary-500/10"
         >
-            {/* Thumbnail */}
-            <div className={`relative aspect-video bg-linear-to-br ${video.gradient} flex items-center justify-center overflow-hidden`}>
-                {/* Glyph anchor */}
-                <span className="text-5xl font-bold text-white/80 drop-shadow-lg select-none">
-                    {video.glyph}
-                </span>
+            {/* Thumbnail — clean gradient with the title as the focal point */}
+            <div className={`relative aspect-video bg-linear-to-br ${video.gradient} flex items-center justify-center overflow-hidden px-4`}>
+                <h4 className="text-2xl md:text-3xl font-bold text-white text-center leading-tight tracking-tight drop-shadow-lg select-none">
+                    {video.title}
+                </h4>
 
-                {/* Play overlay */}
-                <div className="absolute inset-0 flex items-center justify-center bg-black/0 group-hover:bg-black/30 transition-colors">
-                    <div className="w-14 h-14 rounded-full bg-white/95 flex items-center justify-center shadow-2xl scale-90 group-hover:scale-100 transition-transform">
+                {/* Play overlay (visible on hover) */}
+                <div className="absolute inset-0 flex items-center justify-center bg-black/0 group-hover:bg-black/40 transition-colors">
+                    <div className="w-14 h-14 rounded-full bg-white/95 flex items-center justify-center shadow-2xl scale-90 group-hover:scale-100 opacity-0 group-hover:opacity-100 transition-all">
                         <Play className="w-6 h-6 text-navy-950 ml-0.5" fill="currentColor" />
                     </div>
                 </div>

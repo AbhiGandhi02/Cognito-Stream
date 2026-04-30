@@ -20,6 +20,20 @@ function safeParseManimCode(manimCode: string | null): any {
   }
 }
 
+/**
+ * Look up a scene only if its parent storyboard belongs to the given user.
+ * Returns null when the scene doesn't exist OR isn't owned by the user —
+ * routes treat both cases as 404 to avoid leaking storyboard existence.
+ */
+async function findOwnedScene(sceneId: string, userId: string, includeStoryboard = false) {
+  return prisma.scene.findFirst({
+    where: { id: sceneId, storyboard: { userId } },
+    include: includeStoryboard
+      ? { storyboard: { include: { scenes: { orderBy: { sceneNumber: 'asc' } } } } }
+      : undefined,
+  });
+}
+
 // ==========================================
 // VALIDATION SCHEMAS
 // ==========================================
@@ -45,9 +59,10 @@ router.get(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
 
-    const scene = await prisma.scene.findUnique({
-      where: { id },
+    const scene = await prisma.scene.findFirst({
+      where: { id, storyboard: { userId } },
       include: {
         storyboard: {
           select: {
@@ -82,12 +97,11 @@ router.patch(
   validateRequest(updateSceneSchema),
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
     const { narration, manimCode, visualDescription } = req.body;
 
-    // Find the scene first to check if it exists
-    const existingScene = await prisma.scene.findUnique({
-      where: { id },
-    });
+    // Find the scene first to check it exists AND belongs to the user
+    const existingScene = await findOwnedScene(id, userId);
 
     if (!existingScene) {
       return res.status(404).json({
@@ -150,9 +164,10 @@ router.post(
   '/:id/generate-code',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
 
-    const scene = await prisma.scene.findUnique({
-      where: { id },
+    const scene = await prisma.scene.findFirst({
+      where: { id, storyboard: { userId } },
       include: {
         storyboard: {
           include: {
@@ -220,14 +235,13 @@ router.post(
   '/:id/process',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
     const { quality = 'medium' } = req.body;
 
     console.log(`🎬 Processing scene: ${id}`);
 
-    // Get the scene
-    const scene = await prisma.scene.findUnique({
-      where: { id },
-    });
+    // Get the scene (ownership-checked)
+    const scene = await findOwnedScene(id, userId);
 
     if (!scene) {
       return res.status(404).json({
@@ -310,10 +324,9 @@ router.post(
   '/:id/regenerate-audio',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
 
-    const scene = await prisma.scene.findUnique({
-      where: { id },
-    });
+    const scene = await findOwnedScene(id, userId);
 
     if (!scene) {
       return res.status(404).json({
@@ -357,11 +370,10 @@ router.post(
   '/:id/regenerate-video',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
     const { quality = 'medium' } = req.body;
 
-    const scene = await prisma.scene.findUnique({
-      where: { id },
-    });
+    const scene = await findOwnedScene(id, userId);
 
     if (!scene) {
       return res.status(404).json({
@@ -427,6 +439,12 @@ router.delete(
   '/:id',
   asyncHandler(async (req: Request, res: Response) => {
     const { id } = req.params;
+    const userId = req.user!.id;
+
+    const owned = await findOwnedScene(id, userId);
+    if (!owned) {
+      return res.status(404).json({ error: 'Not Found', message: 'Scene not found' });
+    }
 
     await prisma.scene.delete({
       where: { id },
@@ -434,7 +452,7 @@ router.delete(
 
     console.log(`🗑️  Deleted scene: ${id}`);
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Scene deleted successfully',
     });

@@ -1,4 +1,5 @@
 import axios, { type AxiosInstance } from 'axios';
+import { supabase } from '../lib/supabase';
 
 // Types
 export interface Scene {
@@ -52,10 +53,12 @@ class CognitoStreamAPI {
       timeout: 300000, // 5 minutes for long operations
     });
 
-    // Request interceptor for adding auth tokens
+    // Inject the Supabase JWT on every request. Supabase manages refresh
+    // automatically; getSession() returns the live access token.
     this.client.interceptors.request.use(
-      (config) => {
-        const token = localStorage.getItem('auth_token');
+      async (config) => {
+        const { data } = await supabase.auth.getSession();
+        const token = data.session?.access_token;
         if (token) {
           config.headers.Authorization = `Bearer ${token}`;
         }
@@ -64,14 +67,15 @@ class CognitoStreamAPI {
       (error) => Promise.reject(error)
     );
 
-    // Response interceptor for error handling
+    // On 401, sign out and redirect to login. Token is likely stale or revoked.
     this.client.interceptors.response.use(
       (response) => response,
-      (error) => {
+      async (error) => {
         if (error.response?.status === 401) {
-          // Handle unauthorized
-          localStorage.removeItem('auth_token');
-          window.location.href = '/login';
+          await supabase.auth.signOut();
+          if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+            window.location.href = '/login';
+          }
         }
         return Promise.reject(error);
       }
@@ -82,6 +86,88 @@ class CognitoStreamAPI {
   async healthCheck(): Promise<{ status: string; timestamp: string }> {
     const response = await this.client.get('/health');
     return response.data;
+  }
+
+  // ==========================================
+  // ME / AUTH PROFILE
+  // ==========================================
+
+  async getMe(): Promise<{ id: string; email: string; role: 'USER' | 'ADMIN' }> {
+    const response = await this.client.get('/api/me');
+    return response.data;
+  }
+
+  // ==========================================
+  // ADMIN
+  // ==========================================
+
+  async adminListUsers(params?: { limit?: number; offset?: number }) {
+    const response = await this.client.get('/api/admin/users', { params });
+    return response.data as {
+      data: Array<{
+        id: string;
+        email: string;
+        name: string | null;
+        role: 'USER' | 'ADMIN';
+        createdAt: string;
+        storyboardCount: number;
+        lastStoryboardAt: string | null;
+      }>;
+      pagination: { total: number; limit: number; offset: number };
+    };
+  }
+
+  async adminListAllStoryboards(params?: { limit?: number; offset?: number }) {
+    const response = await this.client.get('/api/admin/storyboards', { params });
+    return response.data as {
+      data: Array<{
+        id: string;
+        title: string;
+        description: string;
+        status: string;
+        finalVideoUrl: string | null;
+        totalDuration: number | null;
+        createdAt: string;
+        updatedAt: string;
+        sceneCount: number;
+        user: { id: string; email: string; role: 'USER' | 'ADMIN' } | null;
+      }>;
+      pagination: { total: number; limit: number; offset: number };
+    };
+  }
+
+  async adminListUserStoryboards(userId: string) {
+    const response = await this.client.get(`/api/admin/users/${userId}/storyboards`);
+    return response.data as {
+      user: {
+        id: string;
+        email: string;
+        role: 'USER' | 'ADMIN';
+        createdAt: string;
+      };
+      storyboards: Array<{
+        id: string;
+        title: string;
+        prompt: string;            // the user's original input
+        description: string;
+        status: 'draft' | 'processing' | 'completed' | 'failed';
+        errorMessage: string | null;
+        totalDuration: number | null;
+        createdAt: string;
+        updatedAt: string;
+        scenes: Array<{
+          id: string;
+          sceneNumber: number;
+          status: 'pending' | 'processing' | 'completed' | 'failed';
+          narration: string;
+          visualDescription: string;
+          errorMessage: string | null;
+          correctionAttempts: number;
+          actualDuration: number | null;
+          estimatedDuration: number;
+        }>;
+      }>;
+    };
   }
 
   // ==========================================
