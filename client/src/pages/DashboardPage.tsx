@@ -216,7 +216,7 @@ export function DashboardPage() {
                     >
                         <ArrowLeft className="w-4 h-4" />
                     </button>
-                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center shadow-lg shadow-primary-500/20">
+                    <div className="w-9 h-9 rounded-xl bg-linear-to-br from-primary-400 to-primary-600 flex items-center justify-center shadow-lg shadow-primary-500/20">
                         <Sparkles className="w-5 h-5 text-white" />
                     </div>
                     <div>
@@ -387,7 +387,7 @@ export function DashboardPage() {
                                 return (
                                     <div
                                         key={scene.id}
-                                        className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/[0.02] transition-colors"
+                                        className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/0.02 transition-colors"
                                     >
                                         <span className="shrink-0 w-6 h-6 rounded-full bg-navy-900/80 border border-primary-500/15 text-[11px] font-semibold text-primary-300 flex items-center justify-center">
                                             {scene.sceneNumber}

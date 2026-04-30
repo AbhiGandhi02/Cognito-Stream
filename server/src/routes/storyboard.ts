@@ -388,6 +388,68 @@ router.post(
 );
 
 /**
+ * POST /api/storyboard/:id/render
+ * Trigger the full pipeline (code-gen for any missing scenes, Manim render,
+ * TTS, final assembly) for an existing storyboard. Used by the AnimG-style
+ * "Review → Render" flow where scenes are created in draft mode first.
+ *
+ * Runs asynchronously: returns the storyboard with status='processing' and
+ * the frontend polls until status flips to 'completed' / 'failed'.
+ */
+router.post(
+  '/:id/render',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    const storyboard = await prisma.storyboard.findUnique({
+      where: { id },
+      include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
+    });
+
+    if (!storyboard) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Storyboard not found',
+      });
+    }
+
+    if (!storyboard.scenes || storyboard.scenes.length === 0) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Storyboard has no scenes to render',
+      });
+    }
+
+    // Mark as processing immediately so the polling UI sees the state change.
+    await prisma.storyboard.update({
+      where: { id },
+      data: { status: 'processing' },
+    });
+
+    // Kick off the full pipeline in background — same path as autoGenerate=true.
+    // The orchestrator skips re-generation for scenes that already have code.
+    console.log(`🚀 Starting render pipeline for storyboard ${id}`);
+    processAllScenes(id).catch((err) => {
+      console.error('❌ Render pipeline failed:', err.message);
+    });
+
+    // Return updated storyboard right away. Frontend polls for completion.
+    const updated = await prisma.storyboard.findUnique({
+      where: { id },
+      include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
+    });
+
+    return res.json({
+      ...updated,
+      scenes: updated!.scenes.map((s) => ({
+        ...s,
+        manimCode: safeParseManimCode(s.manimCode || '{}'),
+      })),
+    });
+  })
+);
+
+/**
  * GET /api/storyboard
  */
 router.get(

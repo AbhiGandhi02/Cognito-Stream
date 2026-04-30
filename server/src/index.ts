@@ -54,12 +54,10 @@ app.use('/api/storyboard', storyboardRouter);
 app.use('/api/scene', sceneRouter);
 app.use('/api/render', renderRouter);
 
-// Legacy render endpoint (for backwards compatibility with frontend)
-app.post('/api/storyboard/:id/render', async (req, res) => {
-  // Redirect to the render router
-  req.url = `/storyboard/${req.params.id}`;
-  renderRouter(req, res, () => { });
-});
+// (POST /api/storyboard/:id/render is now handled by the storyboard router
+// in routes/storyboard.ts — it runs the full code-gen + render + assembly
+// pipeline. The previous redirect to renderRouter only assembled already-
+// rendered scenes, which broke the AnimG-style "Review → Render" flow.)
 
 // Serve audio files
 const audioPath = path.join(__dirname, '../../storage/audio');

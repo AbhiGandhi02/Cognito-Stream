@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, send_from_directory
 from manim import *
 from manim import RegularPolygon
+import ast
 import subprocess
 import os
 import json
@@ -703,9 +704,58 @@ def render_full_code():
         
         logger.info(f"🎬 Rendering full code for scene: {scene_id}")
         logger.info(f"Code length: {len(manim_code)} chars, Quality: {quality}")
-        
+
         stats['total_renders'] += 1
-        
+
+        # --- Step 0: Fast Python AST parse ---
+        # Catches syntax errors, indentation errors, truncated output, and
+        # unbalanced brackets in microseconds. Saves a 30-90s Manim render
+        # cycle whenever the LLM emitted broken Python. Error structure
+        # matches LINT_ERROR so the orchestrator's correction loop reuses
+        # the same path.
+        try:
+            ast.parse(manim_code)
+        except SyntaxError as syntax_err:
+            line_no = syntax_err.lineno or 0
+            col_no = syntax_err.offset or 0
+            err_msg = syntax_err.msg or 'Syntax error'
+            # Pull the offending source line and a small context window so the
+            # LLM has surrounding code to reason about during correction.
+            code_lines = manim_code.splitlines()
+            window_start = max(0, line_no - 3)
+            window_end = min(len(code_lines), line_no + 2)
+            context_lines = []
+            for idx in range(window_start, window_end):
+                marker = ' >>> ' if (idx + 1) == line_no else '     '
+                context_lines.append(f"{marker}{idx + 1:4d}: {code_lines[idx]}")
+            context = '\n'.join(context_lines)
+            parsed = (
+                f"SyntaxError at line {line_no}, col {col_no}: {err_msg}\n\n"
+                f"Context:\n{context}"
+            )
+            logger.warning(f"❌ AST parse failed for scene {scene_id} at line {line_no}: {err_msg}")
+            return jsonify({
+                'success': False,
+                'error': f'Syntax error in generated code: {err_msg} (line {line_no})',
+                'lint_error': True,  # route through correction loop
+                'details_stdout': parsed,
+                'details_stderr': f'{type(syntax_err).__name__}: {err_msg} at line {line_no}, column {col_no}',
+                'error_type': 'SYNTAX_ERROR',
+                'parsed_error': parsed,
+            }), 400
+        except (ValueError, MemoryError, RecursionError) as parse_err:
+            # Other parse-time failures (e.g., null bytes, deeply nested literals)
+            logger.warning(f"❌ AST parse rejected scene {scene_id}: {parse_err}")
+            return jsonify({
+                'success': False,
+                'error': f'Cannot parse generated code: {parse_err}',
+                'lint_error': True,
+                'details_stdout': str(parse_err),
+                'details_stderr': f'{type(parse_err).__name__}: {parse_err}',
+                'error_type': 'SYNTAX_ERROR',
+                'parsed_error': f'Generated code could not be parsed: {parse_err}',
+            }), 400
+
         # --- Step 1: Lint the code with flake8 ---
         temp_lint_file = None
         try:
