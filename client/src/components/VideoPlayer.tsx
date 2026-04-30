@@ -58,7 +58,7 @@ export function VideoPlayer({ videoUrl, title, className = '' }: VideoPlayerProp
         <div className={`rounded-2xl overflow-hidden bg-black/40 border border-primary-500/5 relative group ${className}`}>
             {/* Title overlay */}
             {title && (
-                <div className="absolute top-0 left-0 right-0 z-10 p-3 bg-gradient-to-b from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="absolute top-0 left-0 right-0 z-10 p-3 bg-linear-to-b from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
                     <p className="text-xs text-white/80 font-medium">{title}</p>
                 </div>
             )}
@@ -75,7 +75,7 @@ export function VideoPlayer({ videoUrl, title, className = '' }: VideoPlayerProp
             />
 
             {/* Overlay controls */}
-            <div className="absolute bottom-0 left-0 right-0 z-10 p-3 bg-gradient-to-t from-black/70 to-transparent flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="absolute bottom-0 left-0 right-0 z-10 p-3 bg-linear-to-t from-black/70 to-transparent flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity">
                 <button
                     onClick={togglePlay}
                     className="text-white/90 hover:text-white transition-colors"
@@ -99,7 +99,7 @@ export function VideoPlayer({ videoUrl, title, className = '' }: VideoPlayerProp
             {!isPlaying && (
                 <button
                     onClick={togglePlay}
-                    className="absolute inset-0 flex items-center justify-center z-[5] cursor-pointer bg-transparent"
+                    className="absolute inset-0 flex items-center justify-center z-5 cursor-pointer bg-transparent"
                 >
                     <PlayCircle className="w-16 h-16 text-white/50 hover:text-white/80 transition-colors drop-shadow-lg" />
                 </button>

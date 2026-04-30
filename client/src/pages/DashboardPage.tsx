@@ -5,9 +5,11 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, type Storyboard } from '../services/api';
+import { api, type Storyboard, type Scene } from '../services/api';
 import { VideoPlayer } from '../components/VideoPlayer';
 import { ProgressBar } from '../components/ProgressBar';
+// Editable per-scene UI (Monaco editor + textareas) — re-enable when individual scene editing is needed.
+// import { SceneCard } from '../components/SceneCard';
 import {
     Sparkles,
     Download,
@@ -15,6 +17,9 @@ import {
     ArrowLeft,
     Zap,
     FlaskConical,
+    Film,
+    Code as CodeIcon,
+    CheckCircle2,
 } from 'lucide-react';
 
 export function DashboardPage() {
@@ -80,7 +85,9 @@ export function DashboardPage() {
         setLoading(true);
         setError(undefined);
         try {
-            const sb = await api.createStoryboard({ prompt, autoGenerate: true });
+            // Two-step flow: create the storyboard in draft mode (no auto-render).
+            // User reviews/edits scenes + Manim code, then clicks "Render Full Video".
+            const sb = await api.createStoryboard({ prompt, autoGenerate: false });
             setStoryboard(sb);
             setPrompt('');
             setStoryboards((prev) => [sb, ...prev]);
@@ -88,6 +95,60 @@ export function DashboardPage() {
             setError((err as Error).message);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const handleRenderFull = async () => {
+        if (!storyboard) return;
+        setError(undefined);
+        try {
+            const updated = await api.renderStoryboard(storyboard.id);
+            setStoryboard(updated);
+        } catch (err) {
+            setError((err as Error).message);
+        }
+    };
+
+    const handleSceneUpdated = (updated: Scene) => {
+        setStoryboard((prev) =>
+            prev
+                ? {
+                    ...prev,
+                    scenes: prev.scenes.map((s) =>
+                        s.id === updated.id ? { ...s, ...updated } : s
+                    ),
+                }
+                : prev
+        );
+    };
+
+    // Bulk-generate Manim code for every scene that doesn't already have one.
+    // Sequential to keep the previous-scene-context fresh and to be gentle on
+    // Gemini's free-tier RPM limits.
+    const [generatingAll, setGeneratingAll] = useState(false);
+    const [generateProgress, setGenerateProgress] = useState({ done: 0, total: 0 });
+
+    const handleGenerateAllCode = async () => {
+        if (!storyboard) return;
+        setError(undefined);
+        setGeneratingAll(true);
+        setGenerateProgress({ done: 0, total: storyboard.scenes.length });
+        try {
+            for (let i = 0; i < storyboard.scenes.length; i++) {
+                const scene = storyboard.scenes[i];
+                const alreadyHasCode =
+                    typeof scene.manimCode === 'string' &&
+                    scene.manimCode.includes('class GeneratedScene');
+                if (!alreadyHasCode) {
+                    const updated = await api.generateSceneCode(scene.id);
+                    handleSceneUpdated(updated);
+                }
+                setGenerateProgress({ done: i + 1, total: storyboard.scenes.length });
+            }
+        } catch (err) {
+            setError((err as Error).message);
+        } finally {
+            setGeneratingAll(false);
         }
     };
 
@@ -276,6 +337,147 @@ export function DashboardPage() {
                                 </div>
                             </div>
                         )}
+                    </div>
+                </main>
+            ) : storyboard.status === 'draft' ? (
+                /* ====================== REVIEW VIEW (compact list) ====================== */
+                <main className="flex-1 px-4 py-8">
+                    <div className="w-full max-w-3xl mx-auto space-y-5">
+                        {/* Storyboard header */}
+                        <div className="glass-card rounded-2xl p-5">
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-[10px] uppercase tracking-widest text-primary-400 font-semibold mb-1">
+                                        Review Storyboard
+                                    </p>
+                                    <h2 className="text-xl font-bold text-slate-100 truncate">
+                                        {storyboard.title}
+                                    </h2>
+                                    <p className="text-sm text-slate-500 mt-1 line-clamp-2">
+                                        {storyboard.description}
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={handleNewStoryboard}
+                                    className="text-xs text-slate-500 hover:text-slate-300 px-3 py-1.5 rounded-md border border-primary-500/10 hover:border-primary-500/20 transition-colors shrink-0"
+                                >
+                                    Discard
+                                </button>
+                            </div>
+                            <p className="text-xs text-slate-600 mt-3">
+                                Step 1: generate Manim code for all scenes. Step 2: render the final video.
+                            </p>
+                        </div>
+
+                        {/* Error */}
+                        {error && (
+                            <div className="rounded-xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">
+                                {error}
+                            </div>
+                        )}
+
+                        {/* Compact scene list — one line per scene */}
+                        <div className="glass-card rounded-2xl p-4 space-y-1.5">
+                            {storyboard.scenes?.map((scene) => {
+                                const hasCode =
+                                    typeof scene.manimCode === 'string' &&
+                                    scene.manimCode.includes('class GeneratedScene');
+                                const isCurrentlyGenerating =
+                                    generatingAll && generateProgress.done === scene.sceneNumber - 1;
+                                return (
+                                    <div
+                                        key={scene.id}
+                                        className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/[0.02] transition-colors"
+                                    >
+                                        <span className="shrink-0 w-6 h-6 rounded-full bg-navy-900/80 border border-primary-500/15 text-[11px] font-semibold text-primary-300 flex items-center justify-center">
+                                            {scene.sceneNumber}
+                                        </span>
+                                        <span className="text-sm text-slate-300 truncate flex-1">
+                                            {scene.visualDescription || scene.narration}
+                                        </span>
+                                        <span className="shrink-0 text-[11px] flex items-center gap-1">
+                                            {isCurrentlyGenerating ? (
+                                                <span className="text-primary-300 flex items-center gap-1">
+                                                    <RefreshCcw className="w-3 h-3 animate-spin" />
+                                                    Generating
+                                                </span>
+                                            ) : hasCode ? (
+                                                <span className="text-success flex items-center gap-1">
+                                                    <CheckCircle2 className="w-3 h-3" />
+                                                    Code ready
+                                                </span>
+                                            ) : (
+                                                <span className="text-slate-600">Pending</span>
+                                            )}
+                                        </span>
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        {/* Action bar */}
+                        <div className="glass-card rounded-2xl p-5 space-y-3 sticky bottom-4">
+                            {(() => {
+                                const scenesWithCode = storyboard.scenes?.filter(
+                                    (s) =>
+                                        typeof s.manimCode === 'string' &&
+                                        s.manimCode.includes('class GeneratedScene')
+                                ).length || 0;
+                                const total = storyboard.scenes?.length || 0;
+                                const allReady = scenesWithCode === total && total > 0;
+
+                                return (
+                                    <>
+                                        <div className="flex items-center justify-between text-xs">
+                                            <span className="text-slate-500">
+                                                <span className={`font-semibold ${allReady ? 'text-success' : 'text-slate-400'}`}>
+                                                    {scenesWithCode}
+                                                </span>
+                                                <span className="text-slate-600"> / {total} scenes have code</span>
+                                            </span>
+                                            {generatingAll && (
+                                                <span className="text-primary-300">
+                                                    Generating {generateProgress.done} / {generateProgress.total}...
+                                                </span>
+                                            )}
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <button
+                                                onClick={handleGenerateAllCode}
+                                                disabled={generatingAll || allReady}
+                                                className="btn-secondary flex items-center justify-center gap-2 py-2.5 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                                            >
+                                                {generatingAll ? (
+                                                    <>
+                                                        <RefreshCcw className="w-4 h-4 animate-spin" />
+                                                        Generating...
+                                                    </>
+                                                ) : allReady ? (
+                                                    <>
+                                                        <CheckCircle2 className="w-4 h-4" />
+                                                        All Code Ready
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <CodeIcon className="w-4 h-4" />
+                                                        Generate Code
+                                                    </>
+                                                )}
+                                            </button>
+                                            <button
+                                                onClick={handleRenderFull}
+                                                disabled={!allReady || generatingAll}
+                                                className="btn-primary flex items-center justify-center gap-2 py-2.5 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                                            >
+                                                <Film className="w-4 h-4" />
+                                                Render Final Video
+                                            </button>
+                                        </div>
+                                    </>
+                                );
+                            })()}
+                        </div>
                     </div>
                 </main>
             ) : (

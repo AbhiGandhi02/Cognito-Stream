@@ -34,6 +34,8 @@ export interface CreateStoryboardRequest {
 
 export interface UpdateSceneRequest {
   narration?: string;
+  visualDescription?: string;
+  // Raw Python source containing `class GeneratedScene(...)`.
   manimCode?: string;
 }
 
@@ -162,10 +164,19 @@ class CognitoStreamAPI {
   }
 
   /**
-   * Update a scene
+   * Update a scene (narration, visualDescription, or raw Manim Python code).
    */
   async updateScene(id: string, data: UpdateSceneRequest): Promise<Scene> {
     const response = await this.client.patch(`/api/scene/${id}`, data);
+    return response.data;
+  }
+
+  /**
+   * Generate Manim code for a single scene via the LLM. Stores it on the scene
+   * so a later /render call uses the stored code instead of re-generating.
+   */
+  async generateSceneCode(id: string): Promise<Scene> {
+    const response = await this.client.post(`/api/scene/${id}/generate-code`);
     return response.data;
   }
 

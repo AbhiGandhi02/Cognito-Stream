@@ -10,6 +10,7 @@ import { Routes, Route } from 'react-router-dom';
 import { Navbar } from './components/Navbar';
 import { HeroSection } from './components/HeroSection';
 import { FeaturesSection } from './components/FeaturesSection';
+import { ExamplesSection } from './components/ExamplesSection';
 import { HowItWorksSection } from './components/HowItWorksSection';
 import { Footer } from './components/Footer';
 import { DashboardPage } from './pages/DashboardPage';
@@ -22,6 +23,7 @@ function LandingPage() {
       <main>
         <HeroSection />
         <FeaturesSection />
+        <ExamplesSection />
         <HowItWorksSection />
       </main>
       <Footer />

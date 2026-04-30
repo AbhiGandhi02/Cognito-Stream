@@ -46,6 +46,10 @@ interface LLMCallOptions {
   // Override the Gemini model for a single call (e.g. 'gemini-2.5-pro' for code).
   // Falls back to GEMINI_MODEL env, then 'gemini-2.5-flash'.
   geminiModel?: string;
+  // Skip Gemini entirely and call Groq directly. Useful for high-volume calls
+  // (code-gen, corrections) where you want to preserve Gemini's free-tier quota
+  // for cheaper endpoints (e.g. storyboard).
+  forceProvider?: 'gemini' | 'groq';
 }
 
 // Module-local cooldown: when Gemini reports quota exhausted we skip it for
@@ -136,6 +140,20 @@ async function callGroq(opts: LLMCallOptions): Promise<string> {
  * Generate text via Gemini, falling back to Groq when Gemini is over quota.
  */
 export async function callLLMText(opts: LLMCallOptions): Promise<string> {
+  // Explicit provider override — bypasses the cooldown logic.
+  if (opts.forceProvider === 'groq') {
+    console.log('🧠 [Groq] generating (forced)...');
+    const text = await callGroq(opts);
+    console.log(`✅ [Groq] returned ${text.length} chars`);
+    return text;
+  }
+  if (opts.forceProvider === 'gemini') {
+    console.log('🧠 [Gemini] generating (forced)...');
+    const text = await callGemini(opts);
+    console.log(`✅ [Gemini] returned ${text.length} chars`);
+    return text;
+  }
+
   if (!isGeminiBlocked()) {
     try {
       console.log('🧠 [Gemini] generating...');
@@ -486,7 +504,8 @@ export async function generateManimSceneCode(
         userPrompt: buildCodeGenPrompt(params),
         temperature: 0.4,
         maxTokens: 4096,
-        geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-pro',
+        geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-flash',
+        forceProvider: process.env.LLM_CODE_PROVIDER as 'gemini' | 'groq' | undefined,
       });
 
       if (!code || code.trim().length === 0) {
@@ -547,7 +566,8 @@ ${CODE_CORRECTION_SYSTEM_PROMPT}`;
     userPrompt: buildCodeCorrectionPrompt(params),
     temperature: 0.2,
     maxTokens: 4096,
-    geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-pro',
+    geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-flash',
+    forceProvider: process.env.LLM_CODE_PROVIDER as 'gemini' | 'groq' | undefined,
   });
 
   if (!code || code.trim().length === 0) {

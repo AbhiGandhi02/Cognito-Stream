@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { generateAudio } from '../services/elevenlabs';
 import { triggerRenderer } from '../services/renderer';
+import { generateManimSceneCode } from '../services/gemini';
 import { validateRequest } from '../middleware/validation';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { z } from 'zod';
@@ -103,11 +104,14 @@ router.patch(
     }
 
     if (manimCode !== undefined) {
-      // Convert to array if string
-      const codeArray = Array.isArray(manimCode)
-        ? manimCode
-        : [manimCode];
-      updateData.manimCode = JSON.stringify(codeArray);
+      // Modern code-mode pipeline expects raw Python source (a single string
+      // containing `class GeneratedScene(...)`). Legacy callers may still send
+      // an array of operation strings — preserve that shape via JSON.stringify.
+      if (Array.isArray(manimCode)) {
+        updateData.manimCode = JSON.stringify(manimCode);
+      } else {
+        updateData.manimCode = manimCode; // raw Python string
+      }
     }
 
     if (visualDescription !== undefined) {
@@ -132,6 +136,78 @@ router.patch(
     return res.json({
       ...updatedScene,
       manimCode: safeParseManimCode(updatedScene.manimCode),
+    });
+  })
+);
+
+/**
+ * POST /api/scene/:id/generate-code
+ * Generate Manim Python code for a single scene via the LLM (no rendering).
+ * Saves the generated code into scene.manimCode so the orchestrator's later
+ * render call can reuse it (orchestrator skips re-generation when code is present).
+ */
+router.post(
+  '/:id/generate-code',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    const scene = await prisma.scene.findUnique({
+      where: { id },
+      include: {
+        storyboard: {
+          include: {
+            scenes: { orderBy: { sceneNumber: 'asc' } },
+          },
+        },
+      },
+    });
+
+    if (!scene) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Scene not found',
+      });
+    }
+
+    // Build a previous-scenes context summary so the LLM keeps continuity
+    // (same example arrays, variables, equations across scenes).
+    const previousSceneContext = scene.storyboard.scenes
+      .filter((s) => s.sceneNumber < scene.sceneNumber)
+      .map(
+        (s) =>
+          `Scene ${s.sceneNumber} ("${s.visualDescription.slice(0, 80)}"): ${s.narration.slice(0, 200)}`
+      )
+      .join('\n');
+
+    console.log(`🎨 Generating Manim code for scene ${scene.sceneNumber}: "${scene.visualDescription.slice(0, 50)}"`);
+
+    const code = await generateManimSceneCode({
+      sceneTitle: `Scene ${scene.sceneNumber}`,
+      narration: scene.narration,
+      visualDescription: scene.visualDescription,
+      duration: scene.estimatedDuration,
+      sceneNumber: scene.sceneNumber,
+      totalScenes: scene.storyboard.scenes.length,
+      overallTopic: scene.storyboard.prompt,
+      previousSceneContext: previousSceneContext || undefined,
+    });
+
+    const updatedScene = await prisma.scene.update({
+      where: { id },
+      data: {
+        manimCode: code,
+        // Reset render state — code changed, any prior video is stale.
+        status: 'pending',
+        videoUrl: null,
+        actualDuration: null,
+      },
+    });
+
+    console.log(`✅ Manim code saved for scene ${scene.sceneNumber} (${code.length} chars)`);
+
+    return res.json({
+      ...updatedScene,
+      manimCode: updatedScene.manimCode, // raw Python string
     });
   })
 );

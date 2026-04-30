@@ -370,11 +370,18 @@ router.post(
       })),
     };
 
-    // Always auto-process all scenes in background
-    console.log('🚀 Auto-processing all scenes...');
-    processAllScenes(storyboard.id).catch(err => {
-      console.error('❌ Auto-generation failed:', err.message);
-    });
+    // Auto-process scenes only when the client opts in (legacy default).
+    // For the AnimG-style "Review Spec → Iterate" flow, the client should send
+    // autoGenerate: false and trigger rendering later via POST /api/storyboard/:id/render.
+    const { autoGenerate } = req.body;
+    if (autoGenerate !== false) {
+      console.log('🚀 Auto-processing all scenes...');
+      processAllScenes(storyboard.id).catch(err => {
+        console.error('❌ Auto-generation failed:', err.message);
+      });
+    } else {
+      console.log('📝 Storyboard created in draft mode (no auto-render).');
+    }
 
     res.status(201).json(responseData);
   })

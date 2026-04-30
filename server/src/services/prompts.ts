@@ -63,6 +63,50 @@ export const MANIM_CODE_SYSTEM_PROMPT = `You are an expert Manim Community Editi
         *   ❌ Running an entire algorithm to completion when a target duration is given. Show 2-3 iterations and stop.
         *   ❌ Using \`Text(very_long_paragraph)\` without \`.scale_to_fit_width()\`.
         *   ❌ Introducing new example data when "Previous Scenes Context" already names an example.
+
+    17. **PRE-OUTPUT SELF-CHECK — Mentally verify EVERY line before submitting:**
+        Walk through this checklist before responding. If any item fails, fix it.
+        (a) Class named exactly \`GeneratedScene\`? Has \`def construct(self):\`?
+        (b) \`from manim import *\` is the FIRST non-blank line of the script?
+        (c) No \`obj.shift(LEFT * i * X)\` or similar index-multiplier positioning?
+        (d) Sum of all \`run_time\` + \`self.wait(...)\` ≤ TARGET DURATION × 1.5?
+        (e) Every \`Text(...)\` over ~50 chars uses \`.scale_to_fit_width(12)\`?
+        (f) If "Previous Scenes Context" was provided, am I reusing the SAME example array/equation/variable?
+        (g) Every \`MathTex(...)\` or \`Tex(...)\` string starts with \`r"\` (raw string)?
+        (h) Last meaningful line in \`construct\` is \`self.wait(N)\` so the final frame doesn't cut abruptly?
+        (i) Every Mobject I reference is defined earlier in \`construct\` (no NameError)?
+        (j) No method calls like \`.get_lines()\`, \`.get_sides()\` that don't exist on the actual class?
+
+    **CRITICAL API REFERENCE (most-frequently-broken signatures — copy these patterns exactly):**
+
+    Constructors — keyword arguments are required where shown:
+    *   \`Star(n=5, outer_radius=1.0, inner_radius=0.5, color=BLUE, fill_opacity=0.6)\` — NOT \`Star(5, 1.0)\`
+    *   \`Circle(radius=1.0, color=BLUE, fill_opacity=0.5)\`
+    *   \`Square(side_length=1.0, color=GREEN)\`
+    *   \`Rectangle(width=2.0, height=1.0, color=RED)\`
+    *   \`Polygon(v1, v2, v3, ..., color=YELLOW)\` where each \`vN = np.array([x, y, 0])\`
+    *   \`Text("hello", font_size=36, color=WHITE)\` — keyword is \`font_size\`, NOT \`size\`
+    *   \`MathTex(r"\\\\frac{a}{b}", font_size=48, color=WHITE)\` — RAW string mandatory
+    *   \`Arrow(start_point, end_point, color=BLUE, buff=0.1, stroke_width=4)\`
+    *   \`Line(start_point, end_point, color=GRAY, stroke_width=3)\`
+
+    Axes & plotting:
+    *   \`axes = Axes(x_range=[-3, 3, 1], y_range=[-2, 8, 1], x_length=7, y_length=5, axis_config={"include_numbers": True, "font_size": 24})\`
+    *   \`graph = axes.plot(lambda x: x**2, color=YELLOW, x_range=[-2, 2])\`
+    *   \`point = axes.c2p(x_val, y_val)\` — convert axes coords to scene point
+    *   \`axes.get_graph_label(graph, label=MathTex(r"y=x^2"), x_val=1.5, direction=UR)\`
+
+    Animations — prefer GROUPED \`self.play\` over sequential calls:
+    *   ✅ \`self.play(Create(a), Create(b), Write(c), run_time=1.5)\`  (visually parallel)
+    *   ❌ \`self.play(Create(a)); self.play(Create(b)); self.play(Write(c))\`  (slow, choppy)
+    *   ALWAYS pass \`run_time=...\` explicitly so timing is predictable.
+    *   For \`.animate\`: \`obj.animate.shift(RIGHT * 2).set_color(RED).scale(1.2)\` — chain in one expression.
+
+    Camera & style defaults (set these at the top of \`construct\`):
+    *   \`self.camera.background_color = "#1a1a2e"\` (consistent dark navy across the project)
+    *   Title font_size 40-48; body 28-36; labels 22-28.
+    *   Stick to a 2-3 color palette per scene. Pick from BLUE/GREEN/YELLOW/RED + WHITE for contrast.
+
     --- FEW-SHOT EXAMPLES (Provide 3-5 diverse, high-quality examples) ---
 
     **EXAMPLE 1: Simple Shape and Text**
@@ -308,6 +352,19 @@ export const MANIM_CODE_SYSTEM_PROMPT = `You are an expert Manim Community Editi
 
     --- END FEW-SHOT EXAMPLES ---
 
+    ============================================================
+    REMEMBER — Final checklist before you output your code:
+    ============================================================
+    1. Class is named exactly \`GeneratedScene\` with a \`def construct(self):\` method.
+    2. \`from manim import *\` and \`import numpy as np\` at the very top.
+    3. NO manual index shifts (\`LEFT * i * X\`). Use \`VGroup(*items).arrange(RIGHT, buff=0.5)\`.
+    4. Reuse example data from "Previous Scenes Context" — never invent a new array mid-explanation.
+    5. Total animation time (run_time + waits) ≤ TARGET × 1.5. Demo only 2-3 iterations of any algorithm.
+    6. Long Text() → \`.scale_to_fit_width(12)\`. MathTex/Tex → \`r"..."\` raw strings.
+    7. Group simultaneous animations: \`self.play(a, b, c, run_time=...)\`. Always pass \`run_time\`.
+    8. End \`construct\` with \`self.wait(1)\` so the final frame holds.
+    9. Output ONLY the \`\`\`python ... \`\`\` block. No prose, no apologies, no commentary.
+    10. Use the constructor signatures from the CRITICAL API REFERENCE — don't guess.
     `;
 
 // ==========================================
