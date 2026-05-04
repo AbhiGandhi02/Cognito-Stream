@@ -20,7 +20,13 @@
       "Read(//tmp/**)",
       "Bash(curl -s -o /tmp/cs-video.mp4 -w \"size=%{size_download} type=%{content_type}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/videos/test-video-001.mp4\")",
       "Bash(curl -s -o /tmp/cs-final-video.mp4 -w \"video: size=%{size_download}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/videos/demo-storyboard_final.mp4\")",
-      "Bash(curl -s -o /tmp/cs-final-audio.mp3 -w \"audio: size=%{size_download}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/audio/demo-storyboard_final.mp3\")"
+      "Bash(curl -s -o /tmp/cs-final-audio.mp3 -w \"audio: size=%{size_download}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/audio/demo-storyboard_final.mp3\")",
+      "Bash(awk '{print $9, $5}')",
+      "Read(//c/c/Users/abhig/Documents/Cognito-Stream/client/dist/**)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\abhig\\Documents\\Cognito-Stream\\client\\client\\public\\examples",
+      "C:\\Users\\abhig\\Documents\\Cognito-Stream\\client\\public\\examples"
     ]
   }
 }

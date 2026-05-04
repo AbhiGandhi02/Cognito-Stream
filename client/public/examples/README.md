@@ -1,40 +1,58 @@
 # Example Videos
 
-These pre-recorded `.mp4` files back the **Example Animations** section on the landing page. They're served as static assets by Vite and play instantly with no backend / render pipeline involvement.
+The 6 pre-recorded MP4s shown on the landing page **no longer live in this
+directory** — they're stored in Supabase Storage at
+`cognito-stream/examples/<slug>.mp4` and served via public URLs:
 
-## Required filenames
+```
+https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/examples/<slug>.mp4
+```
 
-The frontend expects exactly these six filenames in this directory:
+The slug list and metadata (titles, descriptions, gradients) live in
+[`client/src/data/examples.ts`](../../src/data/examples.ts). The base URL is
+defined as a constant at the top of that file.
 
-| Filename | Topic | Category |
-|---|---|---|
-| `pythagorean-theorem.mp4` | a² + b² = c² | Mathematics |
-| `bubble-sort.mp4` | Bubble Sort visualization | Algorithms |
-| `pendulum-motion.mp4` | Simple Pendulum / SHM | Physics |
-| `binary-search.mp4` | Binary Search on a sorted array | Algorithms |
-| `fourier-series.mp4` | Fourier series of a square wave | Mathematics |
-| `wave-interference.mp4` | Two-source wave interference | Physics |
+## Required filenames in the bucket
 
-If you want to change the list (titles, descriptions, gradient colors, filenames), edit
-[`client/src/data/examples.ts`](../../src/data/examples.ts).
+| Object key                                    | Topic                              |
+|-----------------------------------------------|------------------------------------|
+| `examples/pythagorean-theorem.mp4`            | a² + b² = c² (Mathematics)         |
+| `examples/bubble-sort.mp4`                    | Bubble Sort visualization          |
+| `examples/pendulum-motion.mp4`                | Simple Pendulum / SHM (Physics)    |
+| `examples/binary-search.mp4`                  | Binary Search                      |
+| `examples/fourier-series.mp4`                 | Fourier series of a square wave    |
+| `examples/wave-interference.mp4`              | Two-source wave interference       |
 
-## How to generate them
+## How to (re)generate the example videos
 
 The cleanest path is to use the app itself in dev:
 
-1. Start the renderer + server + client (`docker compose up renderer`, `npm run dev` in both).
-2. From the dashboard, prompt for one of the six topics (e.g., "Explain bubble sort with a 5-element array").
+1. Start the renderer + server + client (`docker compose up renderer`,
+   `npm run dev` in both).
+2. From the dashboard, prompt for one of the six topics (e.g.,
+   "Explain bubble sort with a 5-element array").
 3. Click **Generate Code** → **Render Final Video**.
-4. When the storyboard reaches `completed`, find the `_final.mp4` in `storage/output/` (named like `<storyboardId>_final.mp4`).
-5. Rename it to the matching filename above and copy it into this directory.
+4. When the storyboard reaches `completed`, find the `_final.mp4` in
+   `storage/output/` (named like `<storyboardId>_final.mp4`).
+5. Rename it to the matching slug above and upload via Supabase dashboard
+   (Storage → cognito-stream → examples/) **or** via curl:
+
+   ```bash
+   curl -X POST "https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/cognito-stream/examples/<slug>.mp4" \
+     -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
+     -H "Content-Type: video/mp4" \
+     -H "x-upsert: true" \
+     --data-binary @<your-local-file>.mp4
+   ```
+
 6. Repeat for the remaining topics.
 
-You can also drop in any other MP4s you have — they just need to use the exact filenames listed.
+## Why the bucket and not `client/public/`?
 
-## Optional poster images
+Vercel's free tier handles 5 MB of static videos fine, but moving them out of
+the repo:
 
-Each card uses a tailwind gradient + glyph as a thumbnail by default. If you want a real poster image (extracted first frame, custom artwork, etc.), drop a file like `pythagorean-theorem.jpg` next to the MP4 and add `posterUrl: '/examples/pythagorean-theorem.jpg'` to the matching entry in `examples.ts`.
-
-## Why static files
-
-These videos are decorative on the landing page — they should play in <1 second on click. Routing them through the backend (`/videos/:id`, the renderer proxy) would add latency and pointless server load. Vite serves anything in `client/public/` as-is at the same path, so `/examples/bubble-sort.mp4` just works.
+- Keeps the React client bundle small and fast to deploy.
+- Lets you swap example videos without a redeploy (just upload a new mp4 with
+  the same key — the bucket allows upsert).
+- Keeps git history clean of binary blobs.
