@@ -13,9 +13,9 @@ renderer/output/
 renderer/tasks/
 .vscode/
 .idea/
-package-lock.json
-server/package-lock.json
-client/package-lock.json
+# Lockfiles are committed (NOT ignored) so Render/Vercel get the exact same
+# resolved dependency tree that works locally. Transitive deps drift otherwise
+# (e.g. @types/express-serve-static-core tightening req.params to string|string[]).
 renderer/.mypy_cache/
 storage/
 
