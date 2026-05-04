@@ -20,7 +20,7 @@ import { generateAudio } from './elevenlabs';
 // CONSTANTS
 // ==========================================
 
-const MAX_CORRECTION_ATTEMPTS = 2;
+const MAX_CORRECTION_ATTEMPTS = 3;
 // Process N scenes simultaneously. Each Manim render takes 30-60s, so
 // concurrency 3 cuts an 8-scene pipeline from ~6min to ~2min on a 4-CPU container.
 // LLM rate limits are handled by the Gemini→Groq fallback in gemini.ts.
@@ -172,7 +172,7 @@ export async function processStoryboardScenes(
  * Process a single scene through the full pipeline:
  *   generate code → render → (correct if needed) → TTS → update DB
  */
-async function processScene(
+export async function processScene(
     scene: {
         id: string;
         sceneNumber: number;

@@ -156,6 +156,27 @@ export function DashboardPage() {
         }
     };
 
+    // Per-scene retry: re-runs the full pipeline (LLM + render + TTS) for one
+    // scene that previously failed. Tracks the in-flight scene ID so we can
+    // disable just that row's button while it's processing.
+    const [retryingSceneId, setRetryingSceneId] = useState<string | null>(null);
+
+    const handleRetryScene = async (sceneId: string) => {
+        if (!storyboard) return;
+        setError(undefined);
+        setRetryingSceneId(sceneId);
+        try {
+            const updated = await api.regenerateScene(sceneId);
+            handleSceneUpdated(updated);
+            // Refresh the whole storyboard so finalVideoUrl reassembles if all scenes are now done.
+            await refreshStoryboard(storyboard.id);
+        } catch (err) {
+            setError(`Scene retry failed: ${(err as Error).message}`);
+        } finally {
+            setRetryingSceneId(null);
+        }
+    };
+
     const handleTestGenerate = async () => {
         setLoading(true);
         setError(undefined);
@@ -653,6 +674,26 @@ export function DashboardPage() {
                                                     {scene.visualDescription || scene.narration}
                                                 </p>
                                             </div>
+                                            {scene.status === 'failed' && (
+                                                <button
+                                                    onClick={() => handleRetryScene(scene.id)}
+                                                    disabled={retryingSceneId !== null}
+                                                    className="shrink-0 flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md bg-primary-500/10 hover:bg-primary-500/20 border border-primary-500/20 text-primary-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                                    title="Re-run the full pipeline for this scene"
+                                                >
+                                                    {retryingSceneId === scene.id ? (
+                                                        <>
+                                                            <RefreshCcw className="w-3 h-3 animate-spin" />
+                                                            Retrying
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <RefreshCcw className="w-3 h-3" />
+                                                            Retry
+                                                        </>
+                                                    )}
+                                                </button>
+                                            )}
                                         </div>
                                     ))}
                                 </div>

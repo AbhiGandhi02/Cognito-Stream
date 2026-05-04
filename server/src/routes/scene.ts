@@ -3,6 +3,7 @@ import { prisma } from '../lib/prisma';
 import { generateAudio } from '../services/elevenlabs';
 import { triggerRenderer } from '../services/renderer';
 import { generateManimSceneCode } from '../services/gemini';
+import { processScene } from '../services/orchestrator';
 import { validateRequest } from '../middleware/validation';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { z } from 'zod';
@@ -224,6 +225,73 @@ router.post(
       ...updatedScene,
       manimCode: updatedScene.manimCode, // raw Python string
     });
+  })
+);
+
+/**
+ * POST /api/scene/:id/regenerate
+ * Re-run the full per-scene pipeline (LLM code-gen → render → correction loop → TTS)
+ * for a single scene. Intended for retrying failed scenes after the initial
+ * batch render — clears any prior errorMessage and rebuilds the scene in place.
+ */
+router.post(
+  '/:id/regenerate',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const userId = req.user!.id;
+
+    const scene = await prisma.scene.findFirst({
+      where: { id, storyboard: { userId } },
+      include: {
+        storyboard: { include: { scenes: { orderBy: { sceneNumber: 'asc' } } } },
+      },
+    });
+
+    if (!scene) {
+      return res.status(404).json({ error: 'Not Found', message: 'Scene not found' });
+    }
+
+    // Build the same previous-scene context the batch orchestrator uses, so
+    // continuity (variables, equations, examples) is preserved on retry.
+    const previousSceneContext = scene.storyboard.scenes
+      .filter((s) => s.sceneNumber < scene.sceneNumber && s.status === 'completed')
+      .map((s) => `Scene ${s.sceneNumber}: ${s.narration.slice(0, 200)}`)
+      .join('\n');
+
+    // Wipe stored code + reset state so processScene re-generates from scratch
+    // (otherwise the AI-skip optimization would just retry the broken script).
+    await prisma.scene.update({
+      where: { id },
+      data: {
+        manimCode: '',
+        videoUrl: null,
+        audioUrl: null,
+        actualDuration: null,
+        status: 'pending',
+        errorMessage: null,
+        correctionAttempts: 0,
+      },
+    });
+
+    console.log(`🔁 [scene ${scene.sceneNumber}] Regenerating after manual retry...`);
+
+    const result = await processScene(
+      {
+        id: scene.id,
+        sceneNumber: scene.sceneNumber,
+        narration: scene.narration,
+        visualDescription: scene.visualDescription,
+        estimatedDuration: scene.estimatedDuration,
+        manimCode: '',
+      },
+      scene.storyboard.prompt,
+      scene.storyboard.title,
+      scene.storyboard.scenes.length,
+      previousSceneContext,
+    );
+
+    const fresh = await prisma.scene.findUnique({ where: { id } });
+    return res.json({ ...fresh, processingResult: result });
   })
 );
 

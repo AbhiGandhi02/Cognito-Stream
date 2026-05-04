@@ -489,23 +489,32 @@ Return as JSON with this structure:
  */
 export async function generateManimSceneCode(
   params: SceneCodeGenParams,
-  maxRetries: number = 2
+  maxRetries: number = 3
 ): Promise<string> {
   console.log(`🎨 Generating Manim code for scene ${params.sceneNumber}: "${params.sceneTitle}"`);
 
   let lastError: Error | null = null;
+  // Alternate providers across retries so a model that consistently emits
+  // bad output (e.g. Gemini repeating the same syntax error) gets bypassed.
+  // Attempt 1: respect LLM_CODE_PROVIDER env (defaults to Gemini).
+  // Attempt 2: force the OTHER provider.
+  // Attempt 3: force the original again (different temperature seed).
+  const defaultProvider = (process.env.LLM_CODE_PROVIDER as 'gemini' | 'groq' | undefined) || 'gemini';
+  const otherProvider: 'gemini' | 'groq' = defaultProvider === 'gemini' ? 'groq' : 'gemini';
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`🔄 Code generation attempt ${attempt}/${maxRetries}`);
+      const provider = attempt === 1 ? defaultProvider : (attempt % 2 === 0 ? otherProvider : defaultProvider);
+      console.log(`🔄 Code generation attempt ${attempt}/${maxRetries} via ${provider}`);
 
       let code = await callLLMText({
         systemPrompt: MANIM_CODE_SYSTEM_PROMPT,
         userPrompt: buildCodeGenPrompt(params),
-        temperature: 0.4,
+        // Bump temperature on retries to break out of stuck output patterns.
+        temperature: attempt === 1 ? 0.4 : 0.6,
         maxTokens: 4096,
         geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-flash',
-        forceProvider: process.env.LLM_CODE_PROVIDER as 'gemini' | 'groq' | undefined,
+        forceProvider: provider,
       });
 
       if (!code || code.trim().length === 0) {
@@ -548,7 +557,16 @@ export async function generateManimSceneCode(
 export async function correctManimCode(
   params: CodeCorrectionParams
 ): Promise<string> {
-  console.log(`🔧 Correcting Manim code (attempt ${params.attemptNumber})...`);
+  // Alternate providers on each correction attempt so we don't keep asking
+  // the same model (which already produced bad code) to fix itself.
+  // Attempt 1: force Groq (Gemini just failed once)
+  // Attempt 2: force Gemini (give it another shot at higher temp)
+  // Attempt 3: force Groq again
+  const defaultProvider = (process.env.LLM_CODE_PROVIDER as 'gemini' | 'groq' | undefined) || 'gemini';
+  const otherProvider: 'gemini' | 'groq' = defaultProvider === 'gemini' ? 'groq' : 'gemini';
+  const provider: 'gemini' | 'groq' = params.attemptNumber % 2 === 1 ? otherProvider : defaultProvider;
+
+  console.log(`🔧 Correcting Manim code (attempt ${params.attemptNumber}) via ${provider}...`);
 
   // Compose the correction system prompt: include the FULL code-gen guidance so the
   // model retains version constraints, allowed APIs, and few-shot patterns; then
@@ -564,10 +582,11 @@ ${CODE_CORRECTION_SYSTEM_PROMPT}`;
   let code = await callLLMText({
     systemPrompt: compositeSystemPrompt,
     userPrompt: buildCodeCorrectionPrompt(params),
-    temperature: 0.2,
+    // Slightly higher temp on later corrections to escape the stuck pattern.
+    temperature: params.attemptNumber === 1 ? 0.2 : 0.4,
     maxTokens: 4096,
     geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-flash',
-    forceProvider: process.env.LLM_CODE_PROVIDER as 'gemini' | 'groq' | undefined,
+    forceProvider: provider,
   });
 
   if (!code || code.trim().length === 0) {

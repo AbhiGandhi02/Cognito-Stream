@@ -267,6 +267,15 @@ class CognitoStreamAPI {
   }
 
   /**
+   * Re-run the full per-scene pipeline (LLM code-gen + render + TTS) for a
+   * single scene. Used for retrying failed scenes from the dashboard.
+   */
+  async regenerateScene(id: string): Promise<Scene> {
+    const response = await this.client.post(`/api/scene/${id}/regenerate`);
+    return response.data;
+  }
+
+  /**
    * Process a scene (generate audio + render video)
    */
   async processScene(id: string): Promise<Scene> {
