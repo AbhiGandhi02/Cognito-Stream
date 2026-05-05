@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Groq from 'groq-sdk';
+import axios from 'axios';
 import {
   MANIM_CODE_SYSTEM_PROMPT,
   CODE_CORRECTION_SYSTEM_PROMPT,
@@ -34,8 +35,14 @@ interface StoryboardResponse {
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || '' });
 
+// OpenRouter is OpenAI-compatible — we hit the REST endpoint with axios.
+// Default model: DeepSeek V3.1 free tier (best free code model as of 2026).
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'deepseek/deepseek-chat-v3.1:free';
+const OPENROUTER_ENABLED = OPENROUTER_API_KEY.length > 0;
+
 // ==========================================
-// LLM FALLBACK (Gemini → Groq)
+// LLM FALLBACK (OpenRouter → Gemini → Groq)
 // ==========================================
 
 interface LLMCallOptions {
@@ -46,25 +53,35 @@ interface LLMCallOptions {
   // Override the Gemini model for a single call (e.g. 'gemini-2.5-pro' for code).
   // Falls back to GEMINI_MODEL env, then 'gemini-2.5-flash'.
   geminiModel?: string;
-  // Skip Gemini entirely and call Groq directly. Useful for high-volume calls
-  // (code-gen, corrections) where you want to preserve Gemini's free-tier quota
-  // for cheaper endpoints (e.g. storyboard).
-  forceProvider?: 'gemini' | 'groq';
+  // Skip the cascade and call exactly one provider. Useful for the code-gen
+  // retry rotation (force a different provider on each attempt) and for tests.
+  forceProvider?: 'openrouter' | 'gemini' | 'groq';
 }
 
-// Module-local cooldown: when Gemini reports quota exhausted we skip it for
-// 30 minutes and route to Groq. Resets on server restart.
-const GEMINI_COOLDOWN_MS = 30 * 60 * 1000;
+// Module-local cooldown: when a provider reports quota/auth/server error we
+// skip it for 30 minutes and route to the next tier. Resets on server restart.
+const COOLDOWN_MS = 30 * 60 * 1000;
 let geminiBlockedUntil = 0;
+let openRouterBlockedUntil = 0;
 
 function isGeminiBlocked(): boolean {
   return Date.now() < geminiBlockedUntil;
 }
 
 function blockGemini(reason: string): void {
-  geminiBlockedUntil = Date.now() + GEMINI_COOLDOWN_MS;
-  const minutes = Math.round(GEMINI_COOLDOWN_MS / 60000);
-  console.warn(`⚠️  Gemini cooldown for ${minutes}min — falling back to Groq. (${reason})`);
+  geminiBlockedUntil = Date.now() + COOLDOWN_MS;
+  const minutes = Math.round(COOLDOWN_MS / 60000);
+  console.warn(`⚠️  Gemini cooldown for ${minutes}min — falling back to next provider. (${reason})`);
+}
+
+function isOpenRouterBlocked(): boolean {
+  return Date.now() < openRouterBlockedUntil;
+}
+
+function blockOpenRouter(reason: string): void {
+  openRouterBlockedUntil = Date.now() + COOLDOWN_MS;
+  const minutes = Math.round(COOLDOWN_MS / 60000);
+  console.warn(`⚠️  OpenRouter cooldown for ${minutes}min — falling back to next provider. (${reason})`);
 }
 
 type GeminiErrorCategory = 'quota' | 'auth' | 'server' | 'other';
@@ -136,11 +153,53 @@ async function callGroq(opts: LLMCallOptions): Promise<string> {
   return completion.choices[0]?.message?.content || '';
 }
 
+async function callOpenRouter(opts: LLMCallOptions): Promise<string> {
+  if (!OPENROUTER_ENABLED) {
+    throw new Error('OPENROUTER_API_KEY not configured');
+  }
+
+  const messages: Array<{ role: 'system' | 'user'; content: string }> = [];
+  if (opts.systemPrompt) messages.push({ role: 'system', content: opts.systemPrompt });
+  messages.push({ role: 'user', content: opts.userPrompt });
+
+  // OpenRouter is OpenAI-compatible. HTTP-Referer + X-Title are optional but
+  // help with attribution and free-tier rate limits per the OpenRouter docs.
+  const response = await axios.post(
+    'https://openrouter.ai/api/v1/chat/completions',
+    {
+      model: OPENROUTER_MODEL,
+      messages,
+      temperature: opts.temperature ?? 0.5,
+      max_tokens: opts.maxTokens ?? 4096,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': (process.env.CLIENT_URL || '').split(',')[0].trim() || 'https://cognito-stream.vercel.app',
+        'X-Title': 'Cognito Stream',
+      },
+      timeout: 60000,
+    }
+  );
+
+  return response.data?.choices?.[0]?.message?.content || '';
+}
+
 /**
- * Generate text via Gemini, falling back to Groq when Gemini is over quota.
+ * Generate text via the LLM cascade: OpenRouter (DeepSeek) → Gemini → Groq.
+ * Each tier is skipped if it's in cooldown or unconfigured. Cooldowns are
+ * triggered by quota/auth/5xx errors — other errors propagate.
  */
 export async function callLLMText(opts: LLMCallOptions): Promise<string> {
-  // Explicit provider override — bypasses the cooldown logic.
+  // Explicit provider override — bypasses cooldowns. Used by the code-gen
+  // retry rotation so each attempt forces a different provider.
+  if (opts.forceProvider === 'openrouter') {
+    console.log('🧠 [OpenRouter] generating (forced)...');
+    const text = await callOpenRouter(opts);
+    console.log(`✅ [OpenRouter] returned ${text.length} chars`);
+    return text;
+  }
   if (opts.forceProvider === 'groq') {
     console.log('🧠 [Groq] generating (forced)...');
     const text = await callGroq(opts);
@@ -154,6 +213,27 @@ export async function callLLMText(opts: LLMCallOptions): Promise<string> {
     return text;
   }
 
+  // Tier 1: OpenRouter (primary, DeepSeek by default)
+  if (OPENROUTER_ENABLED && !isOpenRouterBlocked()) {
+    try {
+      console.log(`🧠 [OpenRouter:${OPENROUTER_MODEL}] generating...`);
+      const text = await callOpenRouter(opts);
+      console.log(`✅ [OpenRouter] returned ${text.length} chars`);
+      return text;
+    } catch (err) {
+      // Treat any non-network error as transient and fall through. Network errors
+      // (timeouts) likely mean the provider is unreachable — also fall through.
+      const status = (err as any)?.response?.status;
+      const message = String((err as Error)?.message || '').slice(0, 150);
+      blockOpenRouter(`status=${status} ${message}`);
+    }
+  } else if (!OPENROUTER_ENABLED) {
+    // Skip silently — user hasn't configured OpenRouter.
+  } else {
+    console.log('⏭️  [OpenRouter] in cooldown — falling through to Gemini');
+  }
+
+  // Tier 2: Gemini
   if (!isGeminiBlocked()) {
     try {
       console.log('🧠 [Gemini] generating...');
@@ -175,9 +255,10 @@ export async function callLLMText(opts: LLMCallOptions): Promise<string> {
       }
     }
   } else {
-    console.log('⏭️  [Gemini] in cooldown — using Groq');
+    console.log('⏭️  [Gemini] in cooldown — falling through to Groq');
   }
 
+  // Tier 3: Groq (final fallback)
   console.log('🧠 [Groq] generating...');
   const text = await callGroq(opts);
   console.log(`✅ [Groq] returned ${text.length} chars`);
@@ -185,13 +266,18 @@ export async function callLLMText(opts: LLMCallOptions): Promise<string> {
 }
 
 /**
- * Probe both providers with a tiny prompt and report which one(s) work.
+ * Probe each configured provider with a tiny prompt and report which work.
  * Used by /api/health/llm — does NOT touch the cooldown state.
  */
 export async function pingLLMs(): Promise<{
+  openrouter: { ok: boolean; latencyMs: number; sample?: string; error?: string; configured: boolean; model?: string };
   gemini: { ok: boolean; latencyMs: number; sample?: string; error?: string; quotaError?: boolean };
   groq: { ok: boolean; latencyMs: number; sample?: string; error?: string };
-  fallback: { geminiInCooldown: boolean; cooldownExpiresAt: string | null };
+  fallback: {
+    geminiInCooldown: boolean;
+    openRouterInCooldown: boolean;
+    cooldownExpiresAt: string | null;
+  };
 }> {
   const probe: LLMCallOptions = {
     systemPrompt: 'You are a test bot. Reply with one word.',
@@ -199,6 +285,37 @@ export async function pingLLMs(): Promise<{
     temperature: 0,
     maxTokens: 10,
   };
+
+  // OpenRouter probe
+  const orStart = Date.now();
+  let openRouterResult: { ok: boolean; latencyMs: number; sample?: string; error?: string; configured: boolean; model?: string };
+  if (!OPENROUTER_ENABLED) {
+    openRouterResult = {
+      ok: false,
+      latencyMs: 0,
+      configured: false,
+      error: 'OPENROUTER_API_KEY not set',
+    };
+  } else {
+    try {
+      const text = await callOpenRouter(probe);
+      openRouterResult = {
+        ok: true,
+        latencyMs: Date.now() - orStart,
+        sample: text.trim().slice(0, 50),
+        configured: true,
+        model: OPENROUTER_MODEL,
+      };
+    } catch (err: any) {
+      openRouterResult = {
+        ok: false,
+        latencyMs: Date.now() - orStart,
+        configured: true,
+        model: OPENROUTER_MODEL,
+        error: String(err?.response?.data?.error?.message || err?.message || err).slice(0, 600),
+      };
+    }
+  }
 
   // Gemini probe
   const geminiStart = Date.now();
@@ -238,10 +355,12 @@ export async function pingLLMs(): Promise<{
   }
 
   return {
+    openrouter: openRouterResult,
     gemini: geminiResult,
     groq: groqResult,
     fallback: {
       geminiInCooldown: isGeminiBlocked(),
+      openRouterInCooldown: isOpenRouterBlocked(),
       cooldownExpiresAt:
         geminiBlockedUntil > Date.now() ? new Date(geminiBlockedUntil).toISOString() : null,
     },
@@ -494,17 +613,22 @@ export async function generateManimSceneCode(
   console.log(`🎨 Generating Manim code for scene ${params.sceneNumber}: "${params.sceneTitle}"`);
 
   let lastError: Error | null = null;
-  // Alternate providers across retries so a model that consistently emits
-  // bad output (e.g. Gemini repeating the same syntax error) gets bypassed.
-  // Attempt 1: respect LLM_CODE_PROVIDER env (defaults to Gemini).
-  // Attempt 2: force the OTHER provider.
-  // Attempt 3: force the original again (different temperature seed).
-  const defaultProvider = (process.env.LLM_CODE_PROVIDER as 'gemini' | 'groq' | undefined) || 'gemini';
-  const otherProvider: 'gemini' | 'groq' = defaultProvider === 'gemini' ? 'groq' : 'gemini';
+  // Rotate providers across retries for maximum diversity. A model that
+  // keeps emitting the same broken pattern gets bypassed automatically.
+  // Default rotation: OpenRouter (DeepSeek) → Gemini → Groq.
+  // Skips OpenRouter if it's not configured.
+  const fullRotation: ('openrouter' | 'gemini' | 'groq')[] = OPENROUTER_ENABLED
+    ? ['openrouter', 'gemini', 'groq']
+    : ['gemini', 'groq'];
+  const envOverride = process.env.LLM_CODE_PROVIDER as 'openrouter' | 'gemini' | 'groq' | undefined;
+  // If the user pinned a primary, put it first and follow with the rest.
+  const rotation: ('openrouter' | 'gemini' | 'groq')[] = envOverride
+    ? [envOverride, ...fullRotation.filter((p) => p !== envOverride)]
+    : fullRotation;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const provider = attempt === 1 ? defaultProvider : (attempt % 2 === 0 ? otherProvider : defaultProvider);
+      const provider = rotation[(attempt - 1) % rotation.length];
       console.log(`🔄 Code generation attempt ${attempt}/${maxRetries} via ${provider}`);
 
       let code = await callLLMText({
@@ -557,14 +681,20 @@ export async function generateManimSceneCode(
 export async function correctManimCode(
   params: CodeCorrectionParams
 ): Promise<string> {
-  // Alternate providers on each correction attempt so we don't keep asking
-  // the same model (which already produced bad code) to fix itself.
-  // Attempt 1: force Groq (Gemini just failed once)
-  // Attempt 2: force Gemini (give it another shot at higher temp)
-  // Attempt 3: force Groq again
-  const defaultProvider = (process.env.LLM_CODE_PROVIDER as 'gemini' | 'groq' | undefined) || 'gemini';
-  const otherProvider: 'gemini' | 'groq' = defaultProvider === 'gemini' ? 'groq' : 'gemini';
-  const provider: 'gemini' | 'groq' = params.attemptNumber % 2 === 1 ? otherProvider : defaultProvider;
+  // Rotate providers on each correction attempt so we don't keep asking
+  // the same model (which already produced bad code) to fix itself. We start
+  // the rotation AT POSITION 1 (skipping the original primary that just
+  // failed) and cycle through the rest.
+  const fullRotation: ('openrouter' | 'gemini' | 'groq')[] = OPENROUTER_ENABLED
+    ? ['openrouter', 'gemini', 'groq']
+    : ['gemini', 'groq'];
+  const envOverride = process.env.LLM_CODE_PROVIDER as 'openrouter' | 'gemini' | 'groq' | undefined;
+  const rotation: ('openrouter' | 'gemini' | 'groq')[] = envOverride
+    ? [envOverride, ...fullRotation.filter((p) => p !== envOverride)]
+    : fullRotation;
+  // attemptNumber is 1-indexed; pick the (attemptNumber)th slot which skips
+  // the original primary at index 0.
+  const provider = rotation[params.attemptNumber % rotation.length];
 
   console.log(`🔧 Correcting Manim code (attempt ${params.attemptNumber}) via ${provider}...`);
 
