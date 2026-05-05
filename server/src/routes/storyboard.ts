@@ -55,6 +55,13 @@ async function processAllScenes(storyboardId: string): Promise<void> {
       if (completedScenes.length > 0) {
         console.log(`🎞️ Assembling final video from ${completedScenes.length} scenes...`);
 
+        // Look up the storyboard title so the renderer can use it in the
+        // upload filename (videos/<slug>-<short-id>.mp4).
+        const sb = await prisma.storyboard.findUnique({
+          where: { id: storyboardId },
+          select: { title: true },
+        });
+
         const assemblyResult = await assembleVideo(
           storyboardId,
           completedScenes.map(s => ({
@@ -63,7 +70,8 @@ async function processAllScenes(storyboardId: string): Promise<void> {
             duration: s.actualDuration || s.estimatedDuration,
             sceneNumber: s.sceneNumber,
           })),
-          'medium'
+          'medium',
+          sb?.title || ''
         );
 
         await prisma.storyboard.update({

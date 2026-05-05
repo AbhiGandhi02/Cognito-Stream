@@ -217,9 +217,10 @@ export async function triggerRenderer(
 export async function assembleVideo(
     storyboardId: string,
     scenes: SceneData[],
-    quality: string = 'medium'
+    quality: string = 'medium',
+    title: string = ''
 ): Promise<AssembleResult> {
-    console.log(`🎞️  Assembling video for storyboard: ${storyboardId}`);
+    console.log(`🎞️  Assembling video for storyboard: ${storyboardId} (title='${title}')`);
     console.log(`📊 Scenes: ${scenes.length}, Quality: ${quality}`);
 
     try {
@@ -227,6 +228,7 @@ export async function assembleVideo(
             `${RENDERER_URL}/assemble`,
             {
                 storyboardId,
+                title,
                 scenes: scenes.map((s) => ({
                     videoUrl: s.videoUrl,
                     audioUrl: s.audioUrl,

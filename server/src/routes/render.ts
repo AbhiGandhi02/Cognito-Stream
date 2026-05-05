@@ -103,8 +103,9 @@ router.post(
 
       console.log(`🎞️  Assembling ${scenesData.length} scenes...`);
 
-      // Trigger video assembly
-      const assembleResult = await assembleVideo(id, scenesData, quality);
+      // Trigger video assembly. Pass the storyboard title so the renderer
+      // names the final mp4 with a human-readable slug instead of a CUID.
+      const assembleResult = await assembleVideo(id as string, scenesData, quality, storyboard.title || '');
 
       console.log(`✅ Final video assembled: ${assembleResult.videoUrl}`);
 

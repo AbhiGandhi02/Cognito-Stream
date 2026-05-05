@@ -5,6 +5,7 @@ import ast
 import subprocess
 import os
 import json
+import re
 import tempfile
 import shutil
 import urllib.request
@@ -86,6 +87,32 @@ def upload_to_storage(local_path, storage_path, content_type):
         )
     public_url = client.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
     return public_url.rstrip('/')
+
+def _slugify(text, max_len=60):
+    """Convert title text to a URL-safe slug. Returns empty string if text
+    has no slug-able characters (rare — e.g. all emoji)."""
+    if not text:
+        return ''
+    s = re.sub(r'[^\w\s-]', '', str(text).lower(), flags=re.UNICODE)
+    s = re.sub(r'[-\s]+', '-', s).strip('-')
+    return s[:max_len].rstrip('-')
+
+def build_storage_path(prefix, storyboard_id, title, ext):
+    """Build a Supabase storage path that is human-readable AND unique.
+
+    Format: <prefix>/<slug>-<short_id><ext>
+        e.g. videos/explain-merge-sort-3gl8w0.mp4
+
+    The 6-char suffix from storyboard_id prevents two storyboards with the
+    same title from overwriting each other in the bucket. Falls back to the
+    legacy `<storyboard_id>_final<ext>` path when the title is empty or
+    contains no slug-able characters.
+    """
+    slug = _slugify(title)
+    short = (storyboard_id or '')[-6:].lower()
+    if slug:
+        return f'{prefix}/{slug}-{short}{ext}'
+    return f'{prefix}/{storyboard_id}_final{ext}'
 
 def download_to_local(url_or_path, dest_dir):
     """
@@ -1030,16 +1057,17 @@ def assemble_video():
     try:
         data = request.json
         storyboard_id = data.get('storyboardId')
+        title = data.get('title', '')
         scenes = data.get('scenes', [])
         quality = data.get('quality', DEFAULT_RENDER_QUALITY)
-        
+
         if not storyboard_id or not scenes:
             return jsonify({
                 'success': False,
                 'error': 'Missing required fields: storyboardId and scenes'
             }), 400
-        
-        logger.info(f"🎞️  Assembling video for: {storyboard_id}")
+
+        logger.info(f"🎞️  Assembling video for: {storyboard_id} (title='{title}')")
         logger.info(f"Scenes to assemble: {len(scenes)}")
 
         # Working dir for downloaded inputs and intermediate stitched files.
@@ -1110,12 +1138,14 @@ def assemble_video():
             persistent_path = OUTPUT_DIR / f'{storyboard_id}_final.mp4'
             shutil.copy(str(output_file), str(persistent_path))
 
+            video_storage_path = build_storage_path('videos', storyboard_id, title, '.mp4')
             public_url = upload_to_storage(
                 local_path=str(persistent_path),
-                storage_path=f'videos/{storyboard_id}_final.mp4',
+                storage_path=video_storage_path,
                 content_type='video/mp4',
             )
             video_url = public_url or f'/videos/{storyboard_id}_final.mp4'
+            logger.info(f"✓ Final video uploaded to: {video_storage_path}")
 
             # Concatenate per-scene narration into a single final voice track
             # and upload as audio/<storyboardId>_final.mp3. Skip silently if
@@ -1128,13 +1158,14 @@ def assemble_video():
                     persistent_audio = AUDIO_DIR / f'{storyboard_id}_final.mp3'
                     shutil.copy(str(final_audio_local), str(persistent_audio))
 
+                    audio_storage_path = build_storage_path('audio', storyboard_id, title, '.mp3')
                     audio_public = upload_to_storage(
                         local_path=str(persistent_audio),
-                        storage_path=f'audio/{storyboard_id}_final.mp3',
+                        storage_path=audio_storage_path,
                         content_type='audio/mpeg',
                     )
                     audio_url = audio_public or f'/audio/{storyboard_id}_final.mp3'
-                    logger.info(f"✓ Final voice track uploaded: {audio_url}")
+                    logger.info(f"✓ Final voice track uploaded to: {audio_storage_path}")
                 except Exception as audio_err:
                     logger.error(f"Final voice concat/upload failed: {audio_err}")
 
