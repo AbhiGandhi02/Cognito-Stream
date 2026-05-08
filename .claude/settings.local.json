@@ -22,7 +22,8 @@
       "Bash(curl -s -o /tmp/cs-final-video.mp4 -w \"video: size=%{size_download}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/videos/demo-storyboard_final.mp4\")",
       "Bash(curl -s -o /tmp/cs-final-audio.mp3 -w \"audio: size=%{size_download}\\\\n\" \"https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/audio/demo-storyboard_final.mp3\")",
       "Bash(awk '{print $9, $5}')",
-      "Read(//c/c/Users/abhig/Documents/Cognito-Stream/client/dist/**)"
+      "Read(//c/c/Users/abhig/Documents/Cognito-Stream/client/dist/**)",
+      "Bash(curl -s http://localhost:5000/health -o /dev/null -w \"renderer:%{http_code}\\\\n\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\abhig\\Documents\\Cognito-Stream\\client\\client\\public\\examples",

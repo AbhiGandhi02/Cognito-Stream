@@ -23,6 +23,7 @@ import {
     CheckCircle2,
     Plus,
     History,
+    ChevronDown,
 } from 'lucide-react';
 
 export function DashboardPage() {
@@ -161,6 +162,18 @@ export function DashboardPage() {
     // disable just that row's button while it's processing.
     const [retryingSceneId, setRetryingSceneId] = useState<string | null>(null);
 
+    // Set of scene IDs whose description is currently expanded in the breakdown.
+    const [expandedSceneIds, setExpandedSceneIds] = useState<Set<string>>(new Set());
+
+    const toggleSceneExpanded = (sceneId: string) => {
+        setExpandedSceneIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(sceneId)) next.delete(sceneId);
+            else next.add(sceneId);
+            return next;
+        });
+    };
+
     const handleRetryScene = async (sceneId: string) => {
         if (!storyboard) return;
         setError(undefined);
@@ -193,9 +206,21 @@ export function DashboardPage() {
 
 
 
-    const handleSelectStoryboard = (sb: Storyboard) => {
-        setStoryboard(sb);
+    const handleSelectStoryboard = async (sb: Storyboard) => {
         setError(undefined);
+        // Show the cached row immediately so the UI feels snappy, then fetch
+        // the full storyboard to populate fields the list endpoint omits
+        // (narration, visualDescription, manimCode, videoUrl). Without this
+        // refetch the per-scene description is blank until the user clicks
+        // the manual refresh button.
+        setStoryboard(sb);
+        try {
+            const fresh = await api.getStoryboard(sb.id);
+            setStoryboard(fresh);
+            setStoryboards((prev) => prev.map((s) => (s.id === fresh.id ? fresh : s)));
+        } catch (err) {
+            setError((err as Error).message);
+        }
     };
 
     const handleNewStoryboard = () => {
@@ -647,55 +672,100 @@ export function DashboardPage() {
                                     📋 Scene Breakdown
                                 </h3>
                                 <div className="space-y-2">
-                                    {storyboard.scenes.map((scene) => (
-                                        <div
-                                            key={scene.id}
-                                            className="flex items-start gap-3 rounded-xl bg-navy-900/40 border border-primary-500/5 px-4 py-3"
-                                        >
-                                            <div className="shrink-0 mt-0.5">
-                                                <div
-                                                    className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${scene.status === 'completed'
-                                                            ? 'bg-success/20 text-success'
-                                                            : scene.status === 'processing'
-                                                                ? 'bg-warning/20 text-warning animate-pulse'
-                                                                : scene.status === 'failed'
-                                                                    ? 'bg-danger/20 text-danger'
-                                                                    : 'bg-slate-700 text-slate-500'
-                                                        }`}
-                                                >
-                                                    {scene.status === 'completed' ? '✓' : scene.sceneNumber}
-                                                </div>
-                                            </div>
-                                            <div className="min-w-0 flex-1">
-                                                <p className="text-xs font-medium text-slate-300 line-clamp-1">
-                                                    Scene {scene.sceneNumber}
-                                                </p>
-                                                <p className="text-xs text-slate-600 mt-0.5 line-clamp-2">
-                                                    {scene.visualDescription || scene.narration}
-                                                </p>
-                                            </div>
-                                            {scene.status === 'failed' && (
+                                    {storyboard.scenes.map((scene) => {
+                                        const isExpanded = expandedSceneIds.has(scene.id);
+                                        const previewText = scene.visualDescription || scene.narration || '';
+                                        const hasContent = Boolean(scene.visualDescription || scene.narration);
+                                        return (
+                                            <div
+                                                key={scene.id}
+                                                className="rounded-xl bg-navy-900/40 border border-primary-500/5"
+                                            >
                                                 <button
-                                                    onClick={() => handleRetryScene(scene.id)}
-                                                    disabled={retryingSceneId !== null}
-                                                    className="shrink-0 flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md bg-primary-500/10 hover:bg-primary-500/20 border border-primary-500/20 text-primary-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                                    title="Re-run the full pipeline for this scene"
+                                                    type="button"
+                                                    onClick={() => toggleSceneExpanded(scene.id)}
+                                                    disabled={!hasContent}
+                                                    className="w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-navy-900/60 transition-colors disabled:cursor-default rounded-xl"
+                                                    aria-expanded={isExpanded}
                                                 >
-                                                    {retryingSceneId === scene.id ? (
-                                                        <>
-                                                            <RefreshCcw className="w-3 h-3 animate-spin" />
-                                                            Retrying
-                                                        </>
-                                                    ) : (
-                                                        <>
-                                                            <RefreshCcw className="w-3 h-3" />
-                                                            Retry
-                                                        </>
+                                                    <div className="shrink-0 mt-0.5">
+                                                        <div
+                                                            className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${scene.status === 'completed'
+                                                                ? 'bg-success/20 text-success'
+                                                                : scene.status === 'processing'
+                                                                    ? 'bg-warning/20 text-warning animate-pulse'
+                                                                    : scene.status === 'failed'
+                                                                        ? 'bg-danger/20 text-danger'
+                                                                        : 'bg-slate-700 text-slate-500'
+                                                                }`}
+                                                        >
+                                                            {scene.status === 'completed' ? '✓' : scene.sceneNumber}
+                                                        </div>
+                                                    </div>
+                                                    <div className="min-w-0 flex-1">
+                                                        <p className="text-xs font-medium text-slate-300 line-clamp-1">
+                                                            Scene {scene.sceneNumber}
+                                                        </p>
+                                                        {!isExpanded && (
+                                                            <p className="text-xs text-slate-600 mt-0.5 line-clamp-2">
+                                                                {previewText || <span className="italic text-slate-700">(no description loaded)</span>}
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                    {hasContent && (
+                                                        <ChevronDown
+                                                            className={`shrink-0 w-4 h-4 text-slate-500 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                                                        />
                                                     )}
                                                 </button>
-                                            )}
-                                        </div>
-                                    ))}
+
+                                                {isExpanded && hasContent && (
+                                                    <div className="px-4 pb-3 pt-1 space-y-2.5 border-t border-primary-500/5">
+                                                        {scene.visualDescription && (
+                                                            <div>
+                                                                <p className="text-[10px] font-semibold text-primary-300 uppercase tracking-wider mb-1">
+                                                                    Visual
+                                                                </p>
+                                                                <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-wrap">
+                                                                    {scene.visualDescription}
+                                                                </p>
+                                                            </div>
+                                                        )}
+                                                        {scene.narration && (
+                                                            <div>
+                                                                <p className="text-[10px] font-semibold text-primary-300 uppercase tracking-wider mb-1">
+                                                                    Narration
+                                                                </p>
+                                                                <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-wrap">
+                                                                    {scene.narration}
+                                                                </p>
+                                                            </div>
+                                                        )}
+                                                        {scene.status === 'failed' && (
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); handleRetryScene(scene.id); }}
+                                                                disabled={retryingSceneId !== null}
+                                                                className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md bg-primary-500/10 hover:bg-primary-500/20 border border-primary-500/20 text-primary-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                                                title="Re-run the full pipeline for this scene"
+                                                            >
+                                                                {retryingSceneId === scene.id ? (
+                                                                    <>
+                                                                        <RefreshCcw className="w-3 h-3 animate-spin" />
+                                                                        Retrying
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                        <RefreshCcw className="w-3 h-3" />
+                                                                        Retry
+                                                                    </>
+                                                                )}
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
                                 </div>
                             </div>
                         )}

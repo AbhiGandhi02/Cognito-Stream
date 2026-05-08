@@ -432,36 +432,44 @@ def render_scene_with_manim(scene_file, scene_id, quality='medium'):
         raise
 
 def stitch_audio_video(video_path, audio_path, output_path):
-    """Combine video and audio using FFmpeg"""
-    
-    logger.info(f"Stitching audio to video...")
-    
+    """Combine video and audio. The output duration is driven by the AUDIO
+    (narration) length: the last video frame is held until the audio ends,
+    so narration always plays in full. Without this, Manim scenes whose
+    self.wait() is shorter than the TTS narration cut audio mid-sentence."""
+
+    audio_duration = float(get_video_duration(audio_path))
+    if audio_duration <= 0:
+        # Fall back to old behavior if probing failed for some reason.
+        audio_duration = 60.0
+
+    logger.info(f"Stitching audio ({audio_duration:.2f}s) to video...")
+
+    # Strategy: pad video by cloning the last frame to match audio length, then
+    # cap output at the audio duration with `-t`. We do NOT rely on `-shortest`
+    # because its interaction with the `tpad` filter has produced incorrect
+    # output durations in practice.
     cmd = [
         'ffmpeg',
         '-i', str(video_path),
         '-i', str(audio_path),
-        '-c:v', 'copy',
+        '-vf', f'tpad=stop_mode=clone:stop_duration={audio_duration + 0.5}',
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
         '-b:a', '192k',
-        '-shortest',
-        '-y',  # Overwrite
-        str(output_path)
+        '-t', f'{audio_duration:.3f}',
+        '-y',
+        str(output_path),
     ]
-    
+
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
             raise Exception(f"FFmpeg error: {result.stderr}")
-        
-        logger.info(f"✓ Audio stitched successfully")
+        logger.info(f"✓ Audio stitched successfully (output={audio_duration:.2f}s)")
         return output_path
-        
     except Exception as e:
         logger.error(f"Audio stitching failed: {e}")
         raise
