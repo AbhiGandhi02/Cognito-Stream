@@ -32,9 +32,11 @@ export function Footer() {
                     {/* Brand */}
                     <div className="space-y-4 max-w-sm">
                         <div className="flex items-center gap-2">
-                            <div className="w-8 h-8 rounded-md bg-primary-500/15 border border-primary-500/30 flex items-center justify-center">
-                                <span className="text-primary-300 text-sm font-semibold">C</span>
-                            </div>
+                            <img
+                                src="/image.png"
+                                alt="Cognito Stream"
+                                className="w-8 h-8 rounded-md object-cover"
+                            />
                             <span className="text-base font-semibold text-slate-100 tracking-tight">
                                 Cognito Stream
                             </span>

@@ -48,9 +48,11 @@ export function AuthPage({ mode }: AuthPageProps) {
         <div className="min-h-screen bg-navy-950 text-slate-100 flex items-center justify-center px-6">
             <div className="w-full max-w-sm">
                 <Link to="/" className="flex items-center justify-center gap-2 mb-10 group">
-                    <div className="w-7 h-7 rounded-md bg-primary-500/15 border border-primary-500/30 flex items-center justify-center">
-                        <span className="text-primary-300 text-sm font-semibold">C</span>
-                    </div>
+                    <img
+                        src="/image.png"
+                        alt="Cognito Stream"
+                        className="w-7 h-7 rounded-md object-cover"
+                    />
                     <span className="text-sm font-medium text-slate-200 tracking-tight">
                         Cognito Stream
                     </span>

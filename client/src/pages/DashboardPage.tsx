@@ -342,9 +342,11 @@ export function DashboardPage() {
                     {/* Brand row */}
                     <div className="px-4 py-4 flex items-center justify-between">
                         <Link to="/" className="flex items-center gap-2 min-w-0 group">
-                            <div className="w-7 h-7 shrink-0 rounded-md bg-primary-500/15 border border-primary-500/30 flex items-center justify-center">
-                                <Sparkles className="w-4 h-4 text-primary-300" />
-                            </div>
+                            <img
+                                src="/image.png"
+                                alt="Cognito Stream"
+                                className="w-7 h-7 shrink-0 rounded-md object-cover"
+                            />
                             {!sidebarCollapsed && (
                                 <span className="text-sm font-semibold text-slate-100 tracking-tight truncate group-hover:text-white transition-colors">
                                     Cognito Stream
