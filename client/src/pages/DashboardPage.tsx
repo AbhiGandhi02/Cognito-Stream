@@ -16,7 +16,6 @@ import {
     Sparkles,
     Download,
     RefreshCcw,
-    Zap,
     FlaskConical,
     Film,
     Code as CodeIcon,

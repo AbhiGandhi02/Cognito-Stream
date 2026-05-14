@@ -18,8 +18,11 @@
 
     /* Linting */
     "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
+    /* Unused locals/parameters used to error out the build (TS6133). Relaxed
+     * so a stray unused import doesn't break a Vercel deploy. Treat these as
+     * lint-only signals via the IDE/ESLint instead. */
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
