@@ -52,7 +52,7 @@ const features = [
 
 export function FeaturesSection() {
     return (
-        <section id="features" className="relative py-28 px-6">
+        <section id="features" className="relative py-16 px-6">
             <div className="max-w-5xl mx-auto">
                 {/* Heading */}
                 <motion.div
@@ -71,7 +71,7 @@ export function FeaturesSection() {
                 </motion.div>
 
                 {/* Grid — flat layout, no card surfaces */}
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-10 gap-y-12">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                     {features.map((feature, i) => (
                         <motion.div
                             key={feature.title}
@@ -79,7 +79,7 @@ export function FeaturesSection() {
                             whileInView={{ opacity: 1, y: 0 }}
                             viewport={{ once: true, margin: '-40px' }}
                             transition={{ duration: 0.35, delay: i * 0.06 }}
-                            className="space-y-3"
+                            className="rounded-2xl border border-white/8 bg-white/3 backdrop-blur-md p-6 space-y-3 hover:border-white/15 transition-colors"
                         >
                             <feature.icon className="w-5 h-5 text-primary-400" strokeWidth={1.75} />
                             <h3 className="text-sm font-medium text-slate-200">

@@ -21,10 +21,12 @@ import { generateAudio } from './elevenlabs';
 // ==========================================
 
 const MAX_CORRECTION_ATTEMPTS = 3;
-// Process N scenes simultaneously. Each Manim render takes 30-60s, so
-// concurrency 3 cuts an 8-scene pipeline from ~6min to ~2min on a 4-CPU container.
-// LLM rate limits are handled by the Gemini→Groq fallback in gemini.ts.
-const PARALLEL_CONCURRENCY = Number(process.env.SCENE_CONCURRENCY) || 3;
+// Process N scenes simultaneously. Each Manim render takes 30-60s, so a
+// 6-scene storyboard now runs roughly as fast as a single scene (assuming
+// the renderer and LLMs can keep up). Override via SCENE_CONCURRENCY env.
+// LLM rate limits are handled by the OpenRouter→Gemini→Groq fallback in
+// gemini.ts; renderer load should be checked if you push this much higher.
+const PARALLEL_CONCURRENCY = Number(process.env.SCENE_CONCURRENCY) || 6;
 
 // ==========================================
 // TYPES
@@ -275,6 +277,7 @@ export async function processScene(
             data: {
                 status: 'completed',
                 videoUrl: renderResult.videoUrl,
+                thumbnailUrl: renderResult.thumbnailUrl ?? null,
                 audioUrl: audioResult.audioUrl || null,
                 actualDuration,
                 manimCode: manimCode, // Store the working Manim code

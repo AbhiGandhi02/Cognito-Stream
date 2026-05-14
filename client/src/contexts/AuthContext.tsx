@@ -52,9 +52,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             const { error } = await supabase.auth.signInWithOAuth({
                 provider: 'google',
                 options: {
-                    // Where Supabase sends the user back after the OAuth dance completes.
+                    // Land on the landing page after login (not the dashboard).
                     // Must match an entry in Supabase Dashboard → Auth → URL Configuration → Redirect URLs.
-                    redirectTo: `${window.location.origin}/dashboard`,
+                    redirectTo: `${window.location.origin}/`,
                 },
             });
             if (error) throw error;

@@ -15,6 +15,9 @@ interface RenderResult {
 interface CodeRenderResult {
     success: boolean;
     videoUrl?: string;
+    // First-frame thumbnail (Supabase URL) used as the dashboard scene
+    // poster. Optional — falls back to a gradient placeholder when absent.
+    thumbnailUrl?: string;
     sceneId: string;
     duration?: number;
     renderTime?: number;
@@ -97,12 +100,14 @@ export async function triggerRendererWithCode(
 
         // Keep the renderer's /videos/ path as-is — needed by the /assemble endpoint
         const videoUrl = response.data.videoUrl || '';
+        const thumbnailUrl = response.data.thumbnailUrl || undefined;
 
-        console.log(`✅ Code render complete: ${videoUrl}`);
+        console.log(`✅ Code render complete: ${videoUrl}${thumbnailUrl ? ' + thumb' : ''}`);
 
         return {
             success: true,
             videoUrl,
+            thumbnailUrl,
             sceneId: response.data.sceneId || sceneId,
             duration: response.data.duration,
             renderTime: response.data.renderTime,

@@ -21,10 +21,10 @@ export function AuthPage({ mode }: AuthPageProps) {
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string>();
 
-    // Already signed in? Go straight where they were headed.
+    // Already signed in? Go where they were headed; default to landing page.
     useEffect(() => {
         if (!authLoading && session) {
-            const redirectTo = (location.state as { from?: string } | null)?.from || '/dashboard';
+            const redirectTo = (location.state as { from?: string } | null)?.from || '/';
             navigate(redirectTo, { replace: true });
         }
     }, [authLoading, session, navigate, location.state]);

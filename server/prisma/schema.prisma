@@ -51,6 +51,10 @@ model Scene {
 
   audioUrl            String?
   videoUrl            String?
+  // First-frame jpg for the dashboard breakdown poster. Tiny (~10 KB),
+  // uploaded once when the scene's mp4 is rendered. Optional so old rows
+  // (rendered before this column existed) keep working.
+  thumbnailUrl        String?
 
   status              String      @default("pending") // pending, processing, completed, failed
   // Last error message encountered for this scene (rendering error, AI

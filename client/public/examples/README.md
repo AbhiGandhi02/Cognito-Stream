@@ -11,7 +11,7 @@ https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream
 The slug list and metadata (titles, descriptions, gradients) live in
 [`client/src/data/examples.ts`](../../src/data/examples.ts). The base URL is
 defined as a constant at the top of that file.
-
+  
 ## Required filenames in the bucket
 
 | Object key                                    | Topic                              |

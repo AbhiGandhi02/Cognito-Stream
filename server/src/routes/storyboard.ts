@@ -129,7 +129,7 @@ const updateStoryboardSchema = z.object({
 });
 
 const listQuerySchema = z.object({
-  limit: z.coerce.number().min(1).max(100).default(10),
+  limit: z.coerce.number().min(1).max(500).default(10),
   offset: z.coerce.number().min(0).default(0),
   status: z.enum(['draft', 'processing', 'completed', 'failed']).optional(),
   sortBy: z.enum(['createdAt', 'updatedAt', 'title']).default('createdAt'),
@@ -515,6 +515,7 @@ router.get(
               status: true,
               estimatedDuration: true,
               actualDuration: true,
+              thumbnailUrl: true,
             },
           },
         },

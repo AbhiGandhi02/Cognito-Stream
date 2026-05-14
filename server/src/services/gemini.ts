@@ -32,7 +32,15 @@ interface StoryboardResponse {
 // CONFIGURATION
 // ==========================================
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+// Primary key is preferred. Secondary is a manual fallback used only when the
+// primary is unset/empty — swap by clearing GEMINI_API_KEY_PRIMARY in the env.
+// Legacy GEMINI_API_KEY is honored so existing deploys keep working.
+const GEMINI_API_KEY =
+  process.env.GEMINI_API_KEY_PRIMARY ||
+  process.env.GEMINI_API_KEY_SECONDARY ||
+  process.env.GEMINI_API_KEY ||
+  '';
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || '' });
 
 // OpenRouter is OpenAI-compatible — we hit the REST endpoint with axios.
@@ -221,11 +229,15 @@ export async function callLLMText(opts: LLMCallOptions): Promise<string> {
       console.log(`✅ [OpenRouter] returned ${text.length} chars`);
       return text;
     } catch (err) {
-      // Treat any non-network error as transient and fall through. Network errors
-      // (timeouts) likely mean the provider is unreachable — also fall through.
+      // 402 = out of credits. Common, expected on the free tier — show the
+      // status only, skip the noisy message. Anything else gets the full log.
       const status = (err as any)?.response?.status;
-      const message = String((err as Error)?.message || '').slice(0, 150);
-      blockOpenRouter(`status=${status} ${message}`);
+      if (status === 402) {
+        blockOpenRouter('402 (out of credits)');
+      } else {
+        const message = String((err as Error)?.message || '').slice(0, 150);
+        blockOpenRouter(`status=${status} ${message}`);
+      }
     }
   } else if (!OPENROUTER_ENABLED) {
     // Skip silently — user hasn't configured OpenRouter.
@@ -244,7 +256,7 @@ export async function callLLMText(opts: LLMCallOptions): Promise<string> {
       const category = categorizeGeminiError(err);
       if (category === 'quota' || category === 'auth' || category === 'server') {
         if (category === 'auth') {
-          console.error('❌ Gemini API key issue — verify GEMINI_API_KEY in .env.');
+          console.error('❌ Gemini API key issue — verify GEMINI_API_KEY_PRIMARY / GEMINI_API_KEY_SECONDARY in .env.');
         } else if (category === 'server') {
           console.warn('⚠️  Gemini upstream is overloaded (5xx) — switching to Groq.');
         }
@@ -647,20 +659,44 @@ export async function generateManimSceneCode(
 
       // Strip markdown fences if present
       code = stripMarkdownFences(code);
+      // Patch wrong class names ("class FooScene(Scene):" → "class GeneratedScene(Scene):")
+      code = normalizeSceneClassName(code);
+
+      // Sanity check — a real Manim scene class is several hundred chars at
+      // minimum. If we got back something tiny (e.g. just ")" or a refusal
+      // string), skip validateManimCode so we don't surface the misleading
+      // "missing class GeneratedScene" cascade. Bail with a clearer error
+      // that includes a preview of what actually came back.
+      const trimmed = code.trim();
+      if (trimmed.length < 200) {
+        throw new Error(
+          `LLM returned truncated output (${trimmed.length} chars): ${JSON.stringify(trimmed.slice(0, 120))}`
+        );
+      }
 
       // Pre-render validation — catch known-bad patterns BEFORE shipping to the
       // renderer. Each finding throws into the existing retry loop, saving a
       // 60-90s Manim round-trip per bad attempt.
       const issues = validateManimCode(code);
       if (issues.length > 0) {
-        throw new Error(`Pre-render validation failed: ${issues.join('; ')}`);
+        // Include a head + tail preview so we can see what the LLM actually
+        // returned when it skips the required structure. Useful for telling
+        // "the model returned prose" from "the model returned JSON" etc.
+        const preview =
+          code.length <= 240
+            ? code
+            : `${code.slice(0, 160)} … ${code.slice(-80)}`;
+        throw new Error(
+          `Pre-render validation failed: ${issues.join('; ')} | preview: ${JSON.stringify(preview)}`
+        );
       }
 
       console.log(`✅ Manim code generated (${code.length} chars)`);
       return code;
     } catch (error) {
       lastError = error as Error;
-      console.error(`❌ Code generation attempt ${attempt} failed:`, error);
+      // Log message only — stack traces from validation failures are noise.
+      console.error(`❌ Code generation attempt ${attempt} failed: ${(error as Error).message}`);
 
       if (attempt < maxRetries) {
         const delay = Math.pow(2, attempt) * 1000;
@@ -725,6 +761,8 @@ ${CODE_CORRECTION_SYSTEM_PROMPT}`;
 
   // Strip markdown fences if present
   code = stripMarkdownFences(code);
+  // Patch wrong class names — same self-heal as the initial generation path.
+  code = normalizeSceneClassName(code);
 
   if (!code.includes('class GeneratedScene')) {
     throw new Error('Corrected code missing GeneratedScene class');
@@ -796,6 +834,21 @@ function stripMarkdownFences(code: string): string {
   code = code.replace(/^```(?:python)?\s*\n?/i, '');
   code = code.replace(/\n?```\s*$/i, '');
   return code.trim();
+}
+
+/**
+ * Auto-rename any Scene subclass to `GeneratedScene` so the renderer's loader
+ * always finds the expected class. The LLM occasionally invents its own name
+ * (e.g. `class MyScene(Scene):`) even though the prompt is explicit — instead
+ * of burning a retry on that, we just patch it. The parent class is preserved,
+ * so `MovingCameraScene`, `ThreeDScene`, etc. still work.
+ */
+function normalizeSceneClassName(code: string): string {
+  return code.replace(
+    /class\s+(\w+)\s*\(\s*([A-Z]\w*Scene)\s*\)\s*:/g,
+    (full, name: string, parent: string) =>
+      name === 'GeneratedScene' ? full : `class GeneratedScene(${parent}):`
+  );
 }
 
 // ==========================================

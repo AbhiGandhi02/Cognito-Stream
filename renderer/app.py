@@ -519,6 +519,28 @@ def concatenate_videos(video_paths, output_path):
         logger.error(f"Video concatenation failed: {e}")
         raise
 
+def extract_thumbnail(video_path, output_path, width=480):
+    """Extract the first frame of a video as a JPEG thumbnail. Used to give
+    each scene a visual poster in the dashboard. ~10 KB at 480x270."""
+    cmd = [
+        'ffmpeg',
+        '-y',
+        '-ss', '0',
+        '-i', str(video_path),
+        '-frames:v', '1',
+        '-vf', f'scale={width}:-2',
+        '-q:v', '5',
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise Exception(f"FFmpeg thumbnail error: {result.stderr[:200]}")
+        return output_path
+    except Exception as e:
+        logger.warning(f"Thumbnail extraction failed: {e}")
+        raise
+
 def concatenate_audio(audio_paths, output_path):
     """Concatenate multiple mp3 files into one using FFmpeg's concat demuxer.
     Re-encodes to libmp3lame because copy-mode can produce VBR-mismatched output."""
@@ -1033,9 +1055,27 @@ def render_full_code():
         # is uploaded to Supabase by /assemble to keep bucket usage minimal.
         video_url = f'/videos/{scene_id}.mp4'
 
+        # Extract first-frame thumbnail and upload to Supabase. ~10 KB per
+        # scene; gives the dashboard a real poster image instead of an icon.
+        thumbnail_url = None
+        try:
+            thumb_local = OUTPUT_DIR / f'{scene_id}_thumb.jpg'
+            extract_thumbnail(output_file, thumb_local, width=480)
+            thumb_public = upload_to_storage(
+                local_path=str(thumb_local),
+                storage_path=f'thumbnails/{scene_id}.jpg',
+                content_type='image/jpeg',
+            )
+            thumbnail_url = thumb_public  # None when Supabase isn't configured
+            # Local file no longer needed; stays in OUTPUT_DIR for now and is
+            # cleaned up alongside the per-scene mp4 by /assemble.
+        except Exception as thumb_err:
+            logger.warning(f"Thumbnail step skipped for {scene_id}: {thumb_err}")
+
         return jsonify({
             'success': True,
             'videoUrl': video_url,
+            'thumbnailUrl': thumbnail_url,
             'sceneId': scene_id,
             'duration': video_duration,
             'renderTime': round(render_time, 2)
@@ -1103,7 +1143,11 @@ def assemble_video():
                     continue
                 # Track the per-scene mp4 in OUTPUT_DIR for cleanup after success.
                 if video_url.startswith('/videos/'):
-                    scene_local_files.append(OUTPUT_DIR / video_url[len('/videos/'):])
+                    base = video_url[len('/videos/'):]
+                    scene_local_files.append(OUTPUT_DIR / base)
+                    # Thumbnail jpg lives next to the mp4: <sceneId>_thumb.jpg
+                    stem = Path(base).stem
+                    scene_local_files.append(OUTPUT_DIR / f'{stem}_thumb.jpg')
 
                 # Stitch audio if provided.
                 if audio_url:

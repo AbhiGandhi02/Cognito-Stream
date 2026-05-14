@@ -1,60 +1,230 @@
 @import "tailwindcss";
 
 /* ==========================================
-   COGNITO STREAM — design tokens
-   Direction: minimal, neutral surfaces, single cyan accent.
-   No glassmorphism / blur. No gradient overload. One animation.
+   COGNITO STREAM — monochrome design system
+   Two themes (dark default, light opt-in). All
+   surface/foreground colors flow from CSS vars
+   defined under :root and [data-theme="light"],
+   so flipping the theme attribute on <html>
+   re-skins everything without JSX changes.
+   ========================================== */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surface ramp — pure black at 950, off-blacks above */
+  --surface-50:  #fafafa;
+  --surface-100: #f4f4f5;
+  --surface-200: #e4e4e7;
+  --surface-300: #a1a1aa;
+  --surface-400: #71717a;
+  --surface-500: #52525b;
+  --surface-600: #3f3f46;
+  --surface-700: #27272a;
+  --surface-800: #18181b;
+  --surface-900: #0a0a0a;
+  --surface-950: #000000;
+
+  /* "Primary" ramp — neutral light grey, used for accents on dark surfaces */
+  --primary-50:  #ffffff;
+  --primary-100: #fafafa;
+  --primary-200: #f4f4f5;
+  --primary-300: #d4d4d8;
+  --primary-400: #a1a1aa;
+  --primary-500: #ffffff;
+  --primary-600: #e4e4e7;
+  --primary-700: #71717a;
+  --primary-800: #52525b;
+  --primary-900: #3f3f46;
+
+  /* Semantic foreground / accent / border */
+  --fg-strong:   rgba(255, 255, 255, 0.92);
+  --fg:          rgba(255, 255, 255, 0.86);
+  --fg-muted:    rgba(255, 255, 255, 0.55);
+  --fg-subtle:   rgba(255, 255, 255, 0.35);
+  --border:      rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.18);
+
+  /* Glass surfaces — light frosted overlay on dark base */
+  --glass:        rgba(255, 255, 255, 0.03);
+  --glass-light:  rgba(255, 255, 255, 0.02);
+  --glass-card:   rgba(255, 255, 255, 0.04);
+  --glass-hover:  rgba(255, 255, 255, 0.07);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-border-strong: rgba(255, 255, 255, 0.14);
+  --glass-highlight: rgba(255, 255, 255, 0.06);
+
+  /* Buttons */
+  --btn-primary-bg:    #ffffff;
+  --btn-primary-fg:    #000000;
+  --btn-primary-border: rgba(255, 255, 255, 0.85);
+  --btn-primary-hover: rgba(255, 255, 255, 0.92);
+  --btn-primary-shadow: 0 4px 16px 0 rgba(255, 255, 255, 0.08);
+
+  --btn-secondary-bg:    rgba(255, 255, 255, 0.04);
+  --btn-secondary-fg:    rgba(255, 255, 255, 0.92);
+  --btn-secondary-border: rgba(255, 255, 255, 0.12);
+  --btn-secondary-hover: rgba(255, 255, 255, 0.08);
+  --btn-secondary-border-hover: rgba(255, 255, 255, 0.22);
+
+  /* Hero / mesh glow on dark = soft white. */
+  --hero-glow: rgba(255, 255, 255, 0.05);
+  --hero-base: #000000;
+
+  /* Skeleton shimmer */
+  --skel-1: rgba(255, 255, 255, 0.04);
+  --skel-2: rgba(255, 255, 255, 0.08);
+
+  /* Status — desaturated for monochrome aesthetic */
+  --color-success: #86efac;
+  --color-danger:  #fca5a5;
+  --color-warning: #fde68a;
+  --color-info:    #e4e4e7;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* Inverted surface ramp — 950 is now the lightest (page bg) */
+  --surface-50:  #18181b;
+  --surface-100: #27272a;
+  --surface-200: #3f3f46;
+  --surface-300: #71717a;
+  --surface-400: #a1a1aa;
+  --surface-500: #d4d4d8;
+  --surface-600: #e4e4e7;
+  --surface-700: #f4f4f5;
+  --surface-800: #f8f8f9;
+  --surface-900: #fafafa;
+  --surface-950: #ffffff;
+
+  /* Primary ramp — black on light surfaces */
+  --primary-50:  #000000;
+  --primary-100: #0a0a0a;
+  --primary-200: #18181b;
+  --primary-300: #27272a;
+  --primary-400: #52525b;
+  --primary-500: #000000;
+  --primary-600: #18181b;
+  --primary-700: #a1a1aa;
+  --primary-800: #d4d4d8;
+  --primary-900: #e4e4e7;
+
+  --fg-strong:   rgba(0, 0, 0, 0.92);
+  --fg:          rgba(0, 0, 0, 0.82);
+  --fg-muted:    rgba(0, 0, 0, 0.55);
+  --fg-subtle:   rgba(0, 0, 0, 0.35);
+  --border:      rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.18);
+
+  --glass:        rgba(255, 255, 255, 0.7);
+  --glass-light:  rgba(255, 255, 255, 0.55);
+  --glass-card:   rgba(255, 255, 255, 0.6);
+  --glass-hover:  rgba(255, 255, 255, 0.75);
+  --glass-border: rgba(0, 0, 0, 0.06);
+  --glass-border-strong: rgba(0, 0, 0, 0.12);
+  --glass-highlight: rgba(255, 255, 255, 0.9);
+
+  --btn-primary-bg:    #000000;
+  --btn-primary-fg:    #ffffff;
+  --btn-primary-border: rgba(0, 0, 0, 0.85);
+  --btn-primary-hover: rgba(0, 0, 0, 0.85);
+  --btn-primary-shadow: 0 4px 16px 0 rgba(0, 0, 0, 0.12);
+
+  --btn-secondary-bg:    rgba(0, 0, 0, 0.04);
+  --btn-secondary-fg:    rgba(0, 0, 0, 0.92);
+  --btn-secondary-border: rgba(0, 0, 0, 0.12);
+  --btn-secondary-hover: rgba(0, 0, 0, 0.07);
+  --btn-secondary-border-hover: rgba(0, 0, 0, 0.22);
+
+  --hero-glow: rgba(0, 0, 0, 0.04);
+  --hero-base: #ffffff;
+
+  --skel-1: rgba(0, 0, 0, 0.04);
+  --skel-2: rgba(0, 0, 0, 0.08);
+
+  --color-success: #16a34a;
+  --color-danger:  #dc2626;
+  --color-warning: #d97706;
+  --color-info:    #52525b;
+}
+
+/* ==========================================
+   TAILWIND THEME — bind utility classes to the
+   theme vars so e.g. `bg-navy-950`, `text-slate-100`,
+   `border-white/10` all flip automatically when
+   [data-theme] changes.
    ========================================== */
 
 @theme {
-  /* Primary — Cyan (the only ornamental color) */
-  --color-primary-50: #ecfeff;
-  --color-primary-100: #cffafe;
-  --color-primary-200: #a5f3fc;
-  --color-primary-300: #67e8f9;
-  --color-primary-400: #22d3ee;
-  --color-primary-500: #06b6d4;
-  --color-primary-600: #0891b2;
-  --color-primary-700: #0e7490;
-  --color-primary-800: #155e75;
-  --color-primary-900: #164e63;
+  --color-navy-50:  var(--surface-50);
+  --color-navy-100: var(--surface-100);
+  --color-navy-200: var(--surface-200);
+  --color-navy-300: var(--surface-300);
+  --color-navy-400: var(--surface-400);
+  --color-navy-500: var(--surface-500);
+  --color-navy-600: var(--surface-600);
+  --color-navy-700: var(--surface-700);
+  --color-navy-800: var(--surface-800);
+  --color-navy-900: var(--surface-900);
+  --color-navy-950: var(--surface-950);
 
-  /* Surface — near-black with subtle blue undertone */
-  --color-navy-50:  #f1f4f9;
-  --color-navy-100: #d8dde8;
-  --color-navy-200: #b1b9ca;
-  --color-navy-300: #8b95ab;
-  --color-navy-400: #64708d;
-  --color-navy-500: #4a5470;
-  --color-navy-600: #353d52;
-  --color-navy-700: #232a3c;
-  --color-navy-800: #161c2c;
-  --color-navy-900: #0e1320;
-  --color-navy-950: #080b14;
+  --color-primary-50:  var(--primary-50);
+  --color-primary-100: var(--primary-100);
+  --color-primary-200: var(--primary-200);
+  --color-primary-300: var(--primary-300);
+  --color-primary-400: var(--primary-400);
+  --color-primary-500: var(--primary-500);
+  --color-primary-600: var(--primary-600);
+  --color-primary-700: var(--primary-700);
+  --color-primary-800: var(--primary-800);
+  --color-primary-900: var(--primary-900);
 
-  /* Status — kept narrow */
-  --color-success: #10b981;
-  --color-danger:  #f43f5e;
-  --color-warning: #f59e0b;
-  --color-info:    #38bdf8;
+  --color-success: var(--color-success);
+  --color-danger:  var(--color-danger);
+  --color-warning: var(--color-warning);
+  --color-info:    var(--color-info);
 }
+
+/* ==========================================
+   BASE
+   ========================================== */
 
 html {
   scroll-behavior: smooth;
+  /* Theme transitions feel classy when slow + buttery */
+  transition: background-color 300ms ease, color 300ms ease;
 }
 
 body {
-  background-color: var(--color-navy-950);
-  color: #d4d8e1;
+  background-color: var(--surface-950);
+  color: var(--fg);
   font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-feature-settings: 'cv11', 'ss01', 'ss03';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   letter-spacing: -0.01em;
+  transition: background-color 300ms ease, color 300ms ease;
+}
+
+/* When the user toggles themes, fade every color/background
+   in unison. Specific properties (not `all`) keeps it cheap. */
+*, *::before, *::after {
+  transition-property: background-color, border-color, color, fill, stroke, box-shadow;
+  transition-duration: 250ms;
+  transition-timing-function: ease;
+}
+/* Re-enable instant transitions for explicit animations */
+.no-theme-transition,
+.no-theme-transition *,
+.no-theme-transition *::before,
+.no-theme-transition *::after {
+  transition: none !important;
 }
 
 /* ==========================================
-   SCROLLBAR — thin & quiet
+   SCROLLBAR — thin & quiet, theme-aware
    ========================================== */
 
 ::-webkit-scrollbar {
@@ -67,57 +237,64 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--border);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--border-strong);
 }
 
 /* ==========================================
-   SURFACES
-   No blur, no gradient — just neutral semi-transparent
-   panels with hairline borders. Names kept for backward
-   compatibility with existing components.
+   GLASS SURFACES
    ========================================== */
 
 .glass {
-  background: rgba(255, 255, 255, 0.015);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--glass);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border: 1px solid var(--glass-border);
 }
 
 .glass-light {
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: var(--glass-light);
+  backdrop-filter: blur(10px) saturate(120%);
+  -webkit-backdrop-filter: blur(10px) saturate(120%);
+  border: 1px solid var(--glass-border);
 }
 
 .glass-card {
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  background: var(--glass-card);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-highlight),
+    0 1px 2px 0 rgba(0, 0, 0, 0.12);
+  transition: border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.2s ease;
 }
 
 .glass-card:hover {
-  background: rgba(255, 255, 255, 0.03);
-  border-color: rgba(255, 255, 255, 0.12);
+  background: var(--glass-hover);
+  border-color: var(--glass-border-strong);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-highlight),
+    0 8px 28px -4px rgba(0, 0, 0, 0.25);
 }
 
 /* ==========================================
-   TEXT
-   gradient-text now uses a single cyan ramp instead
-   of the old cyan→amber. One accent.
+   TEXT — monochrome with subtle sheen
    ========================================== */
 
 .gradient-text {
-  background: linear-gradient(135deg, var(--color-primary-200), var(--color-primary-500));
+  background: linear-gradient(135deg, var(--fg-strong) 0%, var(--fg-muted) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
 .gradient-text-cyan {
-  background: linear-gradient(135deg, var(--color-primary-200), var(--color-primary-500));
+  background: linear-gradient(135deg, var(--fg-strong) 0%, var(--fg-muted) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -125,51 +302,63 @@ body {
 
 /* ==========================================
    BUTTONS
-   Solid fills, narrower padding, restrained shadows.
    ========================================== */
 
 .btn-primary {
-  background: var(--color-primary-500);
-  color: white;
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
   padding: 0.625rem 1.25rem;
   border-radius: 0.5rem;
   font-weight: 500;
-  transition: background-color 0.15s ease;
+  border: 1px solid var(--btn-primary-border);
+  transition: background-color 0.15s ease, transform 0.08s ease, box-shadow 0.2s ease;
+  box-shadow: 0 0 0 0 transparent;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: var(--color-primary-400);
+  background: var(--btn-primary-hover);
+  box-shadow: var(--btn-primary-shadow);
+  transform: translateY(-1px);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .btn-primary:disabled {
-  opacity: 0.35;
+  opacity: 0.3;
   cursor: not-allowed;
 }
 
 .btn-secondary {
-  background: transparent;
-  color: #d4d8e1;
+  background: var(--btn-secondary-bg);
+  color: var(--btn-secondary-fg);
   padding: 0.625rem 1.25rem;
   border-radius: 0.5rem;
   font-weight: 500;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  border: 1px solid var(--btn-secondary-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.08s ease;
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.18);
+  background: var(--btn-secondary-hover);
+  border-color: var(--btn-secondary-border-hover);
+  transform: translateY(-1px);
+}
+
+.btn-secondary:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .btn-secondary:disabled {
-  opacity: 0.35;
+  opacity: 0.3;
   cursor: not-allowed;
 }
 
 /* ==========================================
    ANIMATIONS
-   Just the loading shimmer. Removed the float / glow /
-   pulse-glow ornaments — they were visual noise.
    ========================================== */
 
 @keyframes shimmer {
@@ -180,25 +369,87 @@ body {
 .skeleton {
   background: linear-gradient(
     90deg,
-    rgba(255, 255, 255, 0.04) 25%,
-    rgba(255, 255, 255, 0.08) 50%,
-    rgba(255, 255, 255, 0.04) 75%
+    var(--skel-1) 25%,
+    var(--skel-2) 50%,
+    var(--skel-1) 75%
   );
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
 }
 
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.fade-in-up {
+  animation: fade-in-up 0.5s ease-out both;
+}
+
 /* ==========================================
    HERO BACKGROUND
-   One soft cyan glow at the top. No mesh.
    ========================================== */
 
 .hero-gradient {
   background:
-    radial-gradient(ellipse 60% 40% at 50% 0%, rgba(6, 182, 212, 0.08) 0%, transparent 60%),
-    var(--color-navy-950);
+    radial-gradient(ellipse 70% 50% at 50% 0%, var(--hero-glow) 0%, transparent 65%),
+    var(--hero-base);
 }
 
 .mesh-gradient {
-  background: var(--color-navy-950);
+  background:
+    radial-gradient(ellipse 80% 60% at 0% 100%, var(--hero-glow) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 100% 0%, var(--hero-glow) 0%, transparent 55%),
+    var(--hero-base);
+}
+
+/* ==========================================
+   UTILITY — subtle grain for a "classy" finish.
+   Adds a tiny noise-like overlay over hero/section
+   surfaces so flat blacks/whites don't feel sterile.
+   Pure SVG — no asset loaded.
+   ========================================== */
+
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.025;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
+/* ==========================================
+   LIGHT THEME TEXT OVERRIDES
+   The UI was authored dark-first; in light mode we collapse every
+   slate-/white- text utility to one near-black color so it stays
+   legible on the now-white surfaces. Only `color` is touched —
+   shadows, backgrounds, and other utilities are intentionally
+   left alone. Gradient-text spans drop their gradient and render
+   as solid black for the same reason.
+   ========================================== */
+
+[data-theme="light"] [class*="text-slate-"],
+[data-theme="light"] [class*="text-white"],
+[data-theme="light"] [class*=":text-slate-"]:hover,
+[data-theme="light"] [class*=":text-white"]:hover {
+  color: #0a0a0a !important;
+}
+
+[data-theme="light"] .gradient-text,
+[data-theme="light"] .gradient-text-cyan {
+  background: none !important;
+  -webkit-background-clip: initial !important;
+  background-clip: initial !important;
+  -webkit-text-fill-color: #0a0a0a !important;
+  color: #0a0a0a !important;
+}
+
+/* Light theme: white-tinted borders become a solid near-black so cards,
+   chips, and inputs stay outlined on a white page. Hover variants are
+   matched too so the border doesn't flash white on interaction. */
+[data-theme="light"] [class*="border-white"],
+[data-theme="light"] [class*=":border-white"]:hover {
+  border-color: rgba(0, 0, 0, 0.35) !important;
 }

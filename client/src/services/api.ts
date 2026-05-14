@@ -12,6 +12,8 @@ export interface Scene {
   actualDuration?: number;
   audioUrl?: string;
   videoUrl?: string;
+  // First-frame jpg poster for the dashboard breakdown.
+  thumbnailUrl?: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
 }
 
