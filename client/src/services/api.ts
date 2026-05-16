@@ -15,6 +15,10 @@ export interface Scene {
   // First-frame jpg poster for the dashboard breakdown.
   thumbnailUrl?: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
+  // Last error from the orchestrator if rendering / correction failed.
+  // Capped at 2000 chars by the server.
+  errorMessage?: string | null;
+  correctionAttempts?: number;
 }
 
 export interface Storyboard {

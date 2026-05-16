@@ -453,3 +453,16 @@ body {
 [data-theme="light"] [class*=":border-white"]:hover {
   border-color: rgba(0, 0, 0, 0.35) !important;
 }
+
+/* Opt-out: any descendant of an element with `force-dark-controls` keeps the
+   original white-tinted text/border colors in light mode. Use this on
+   surfaces that genuinely stay dark in both themes — video players sitting
+   on a black gradient overlay, full-bleed media chrome, etc. */
+[data-theme="light"] .force-dark-controls [class*="text-white"],
+[data-theme="light"] .force-dark-controls [class*=":text-white"]:hover {
+  color: rgba(255, 255, 255, 0.92) !important;
+}
+[data-theme="light"] .force-dark-controls [class*="border-white"],
+[data-theme="light"] .force-dark-controls [class*=":border-white"]:hover {
+  border-color: rgba(255, 255, 255, 0.15) !important;
+}

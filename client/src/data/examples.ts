@@ -1,10 +1,15 @@
 /**
  * Featured example videos shown on the landing page.
  *
- * Files live in Supabase Storage at `cognito-stream/examples/<slug>.mp4` and
- * are served via public URLs (the bucket is public, so no signed-URL handling).
- * Each entry has a fallback gradient thumbnail used when no poster image is
- * provided.
+ * Two-source data model:
+ *   • Entries with `storyboardId` are fetched live from the public read
+ *     endpoint (`/api/public/storyboard/:id`) — these are real generated
+ *     videos stored against a storyboard row in the DB.
+ *   • Entries with `videoUrl` use a static Supabase Storage URL — used for
+ *     legacy examples that haven't been re-generated yet.
+ *
+ * Each entry has a fallback gradient + glyph used as the thumbnail before
+ * the video's first frame paints.
  */
 
 const EXAMPLES_BASE_URL =
@@ -17,7 +22,11 @@ export interface ExampleVideo {
     title: string;
     category: ExampleCategory;
     description: string;
-    videoUrl: string;
+    /** Live-fetched: storyboard id in the DB. The landing page resolves this
+     *  to a `finalVideoUrl` at runtime via the public endpoint. */
+    storyboardId?: string;
+    /** Static fallback for legacy / not-yet-regenerated examples. */
+    videoUrl?: string;
     /** Optional poster image (jpg/png) for the thumbnail. Falls back to gradient. */
     posterUrl?: string;
     /** Display-friendly duration like "0:42". */
@@ -34,18 +43,18 @@ export const EXAMPLE_VIDEOS: ExampleVideo[] = [
         title: 'Pythagorean Theorem',
         category: 'Mathematics',
         description: 'How a² + b² = c² becomes intuitive when you see the squares.',
-        videoUrl: `${EXAMPLES_BASE_URL}/pythagorean-theorem.mp4`,
-        duration: '0:30',
+        storyboardId: 'cmp7ddjk20002gg9l6fxnerm4',
+        duration: '2:05',
         gradient: 'from-blue-500/40 via-cyan-500/30 to-blue-700/40',
-        glyph: 'a²+b²',
+        glyph: 'a²+b²=c²',
     },
     {
         id: 'bubble-sort',
         title: 'Bubble Sort',
         category: 'Algorithms',
         description: 'Watch numbers swap into order, one comparison at a time.',
-        videoUrl: `${EXAMPLES_BASE_URL}/bubble-sort.mp4`,
-        duration: '0:34',
+        storyboardId: 'cmp7e7jde0002ut7idagxm429',
+        duration: '2:13',
         gradient: 'from-emerald-500/40 via-teal-500/30 to-emerald-700/40',
         glyph: '↔',
     },
@@ -54,8 +63,8 @@ export const EXAMPLE_VIDEOS: ExampleVideo[] = [
         title: 'Simple Pendulum',
         category: 'Physics',
         description: 'Simple harmonic motion derived from gravity and string length.',
-        videoUrl: `${EXAMPLES_BASE_URL}/pendulum-motion.mp4`,
-        duration: '0:31',
+        storyboardId: 'cmp7eh8jr000lut7iqspklsw4',
+        duration: '1:11',
         gradient: 'from-purple-500/40 via-fuchsia-500/30 to-purple-700/40',
         glyph: '∿',
     },
@@ -64,8 +73,8 @@ export const EXAMPLE_VIDEOS: ExampleVideo[] = [
         title: 'Binary Search',
         category: 'Algorithms',
         description: 'O(log n) lookup by halving a sorted range each step.',
-        videoUrl: `${EXAMPLES_BASE_URL}/binary-search.mp4`,
-        duration: '0:32',
+        storyboardId: 'cmp7erd7m000yut7ie31vgqiq',
+        duration: '2:13',
         gradient: 'from-amber-500/40 via-orange-500/30 to-amber-700/40',
         glyph: '🔍',
     },
@@ -74,8 +83,8 @@ export const EXAMPLE_VIDEOS: ExampleVideo[] = [
         title: 'Fourier Series',
         category: 'Mathematics',
         description: 'A square wave reconstructed from sine waves, term by term.',
-        videoUrl: `${EXAMPLES_BASE_URL}/fourier-series.mp4`,
-        duration: '0:32',
+        storyboardId: 'cmp8rnbn9000a4j84qvrorr3k',
+        duration: '1:28',
         gradient: 'from-pink-500/40 via-rose-500/30 to-pink-700/40',
         glyph: '∑',
     },
@@ -84,8 +93,8 @@ export const EXAMPLE_VIDEOS: ExampleVideo[] = [
         title: 'Wave Interference',
         category: 'Physics',
         description: 'Two ripples meet — constructive and destructive overlap.',
-        videoUrl: `${EXAMPLES_BASE_URL}/wave-interference.mp4`,
-        duration: '0:32',
+        storyboardId: 'cmp8skw2c0002135qegc0rta9',
+        duration: '2:28',
         gradient: 'from-sky-500/40 via-indigo-500/30 to-sky-700/40',
         glyph: '≋',
     },

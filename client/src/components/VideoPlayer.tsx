@@ -55,7 +55,7 @@ export function VideoPlayer({ videoUrl, title, className = '' }: VideoPlayerProp
     }
 
     return (
-        <div className={`rounded-2xl overflow-hidden bg-black/40 border border-primary-500/5 relative group ${className}`}>
+        <div className={`force-dark-controls rounded-2xl overflow-hidden bg-black/40 border border-primary-500/5 relative group ${className}`}>
             {/* Title overlay */}
             {title && (
                 <div className="absolute top-0 left-0 right-0 z-10 p-3 bg-linear-to-b from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">

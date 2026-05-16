@@ -11,6 +11,7 @@ console.log('🔗 Renderer URL:', process.env.RENDERER_URL || 'http://localhost:
 
 // Import routes
 import storyboardRouter from './routes/storyboard';
+import publicRouter from './routes/public';
 import sceneRouter from './routes/scene';
 import renderRouter from './routes/render';
 import meRouter from './routes/me';
@@ -58,6 +59,9 @@ app.get('/api/health/llm', async (_req, res) => {
     res.status(500).json({ error: String(err?.message || err) });
   }
 });
+
+// Public (no-auth) read endpoints for the landing page demo videos.
+app.use('/api/public', publicRouter);
 
 // API Routes — all gated behind Supabase JWT verification
 app.use('/api/me', requireAuth, meRouter);

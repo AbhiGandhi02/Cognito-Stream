@@ -92,6 +92,17 @@ function blockOpenRouter(reason: string): void {
   console.warn(`⚠️  OpenRouter cooldown for ${minutes}min — falling back to next provider. (${reason})`);
 }
 
+let groqBlockedUntil = 0;
+function isGroqBlocked(): boolean {
+  return Date.now() < groqBlockedUntil;
+}
+function blockGroq(reason: string): void {
+  // Shorter cooldown (2min) — Groq TPM resets per minute, so a long block
+  // would lock it out unnecessarily.
+  groqBlockedUntil = Date.now() + 2 * 60 * 1000;
+  console.warn(`⚠️  Groq cooldown for 2min — falling back to next provider. (${reason})`);
+}
+
 type GeminiErrorCategory = 'quota' | 'auth' | 'server' | 'other';
 
 function categorizeGeminiError(error: any): GeminiErrorCategory {
@@ -199,26 +210,60 @@ async function callOpenRouter(opts: LLMCallOptions): Promise<string> {
  * Each tier is skipped if it's in cooldown or unconfigured. Cooldowns are
  * triggered by quota/auth/5xx errors — other errors propagate.
  */
+/**
+ * Convert a provider error (Axios / Groq SDK / Gemini SDK) into a short
+ * single-line Error. Avoids dumping the entire request body when a 402 / 413
+ * propagates up to orchestrator logs.
+ */
+function shortProviderError(provider: string, err: unknown): Error {
+  const anyErr = err as any;
+  const status = anyErr?.response?.status ?? anyErr?.status;
+  const apiMessage =
+    anyErr?.response?.data?.error?.message ?? anyErr?.error?.error?.message;
+  const fallback = String((err as Error)?.message ?? err).slice(0, 200);
+  const detail = apiMessage ? String(apiMessage).slice(0, 200) : fallback;
+  return new Error(`[${provider}] ${status ?? 'error'} — ${detail}`);
+}
+
 export async function callLLMText(opts: LLMCallOptions): Promise<string> {
   // Explicit provider override — bypasses cooldowns. Used by the code-gen
-  // retry rotation so each attempt forces a different provider.
+  // retry rotation so each attempt forces a different provider. Errors are
+  // sanitized so a 402 / 413 doesn't dump the entire axios request object.
   if (opts.forceProvider === 'openrouter') {
     console.log('🧠 [OpenRouter] generating (forced)...');
-    const text = await callOpenRouter(opts);
-    console.log(`✅ [OpenRouter] returned ${text.length} chars`);
-    return text;
+    try {
+      const text = await callOpenRouter(opts);
+      console.log(`✅ [OpenRouter] returned ${text.length} chars`);
+      return text;
+    } catch (err) {
+      throw shortProviderError('OpenRouter', err);
+    }
   }
   if (opts.forceProvider === 'groq') {
     console.log('🧠 [Groq] generating (forced)...');
-    const text = await callGroq(opts);
-    console.log(`✅ [Groq] returned ${text.length} chars`);
-    return text;
+    try {
+      const text = await callGroq(opts);
+      console.log(`✅ [Groq] returned ${text.length} chars`);
+      return text;
+    } catch (err) {
+      // 413 = TPM exceeded. Set a short cooldown so we don't keep picking
+      // Groq on the next retry attempt.
+      const status = (err as any)?.status ?? (err as any)?.response?.status;
+      if (status === 413) {
+        blockGroq('413 (TPM exceeded)');
+      }
+      throw shortProviderError('Groq', err);
+    }
   }
   if (opts.forceProvider === 'gemini') {
     console.log('🧠 [Gemini] generating (forced)...');
-    const text = await callGemini(opts);
-    console.log(`✅ [Gemini] returned ${text.length} chars`);
-    return text;
+    try {
+      const text = await callGemini(opts);
+      console.log(`✅ [Gemini] returned ${text.length} chars`);
+      return text;
+    } catch (err) {
+      throw shortProviderError('Gemini', err);
+    }
   }
 
   // Tier 1: OpenRouter (primary, DeepSeek by default)
@@ -628,7 +673,6 @@ export async function generateManimSceneCode(
   // Rotate providers across retries for maximum diversity. A model that
   // keeps emitting the same broken pattern gets bypassed automatically.
   // Default rotation: OpenRouter (DeepSeek) → Gemini → Groq.
-  // Skips OpenRouter if it's not configured.
   const fullRotation: ('openrouter' | 'gemini' | 'groq')[] = OPENROUTER_ENABLED
     ? ['openrouter', 'gemini', 'groq']
     : ['gemini', 'groq'];
@@ -640,7 +684,12 @@ export async function generateManimSceneCode(
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const provider = rotation[(attempt - 1) % rotation.length];
+      let provider = rotation[(attempt - 1) % rotation.length];
+      // Skip Groq if it's TPM-cooled — wasting an attempt on a guaranteed
+      // 413 just to hit the same wall is pointless.
+      if (provider === 'groq' && isGroqBlocked()) {
+        provider = rotation.find((p) => p !== 'groq') || provider;
+      }
       console.log(`🔄 Code generation attempt ${attempt}/${maxRetries} via ${provider}`);
 
       let code = await callLLMText({
@@ -648,7 +697,9 @@ export async function generateManimSceneCode(
         userPrompt: buildCodeGenPrompt(params),
         // Bump temperature on retries to break out of stuck output patterns.
         temperature: attempt === 1 ? 0.4 : 0.6,
-        maxTokens: 4096,
+        // 4096 was getting truncated mid-imports for verbose models — give
+        // the scene class room to actually finish.
+        maxTokens: 8192,
         geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-flash',
         forceProvider: provider,
       });
@@ -659,8 +710,7 @@ export async function generateManimSceneCode(
 
       // Strip markdown fences if present
       code = stripMarkdownFences(code);
-      // Patch wrong class names ("class FooScene(Scene):" → "class GeneratedScene(Scene):")
-      code = normalizeSceneClassName(code);
+      code = normalizeManimCode(code);
 
       // Sanity check — a real Manim scene class is several hundred chars at
       // minimum. If we got back something tiny (e.g. just ")" or a refusal
@@ -730,27 +780,24 @@ export async function correctManimCode(
     : fullRotation;
   // attemptNumber is 1-indexed; pick the (attemptNumber)th slot which skips
   // the original primary at index 0.
-  const provider = rotation[params.attemptNumber % rotation.length];
+  let provider = rotation[params.attemptNumber % rotation.length];
+  if (provider === 'groq' && isGroqBlocked()) {
+    provider = rotation.find((p) => p !== 'groq') || provider;
+  }
 
   console.log(`🔧 Correcting Manim code (attempt ${params.attemptNumber}) via ${provider}...`);
 
-  // Compose the correction system prompt: include the FULL code-gen guidance so the
-  // model retains version constraints, allowed APIs, and few-shot patterns; then
-  // append the error-recovery-specific rules.
-  const compositeSystemPrompt = `${MANIM_CODE_SYSTEM_PROMPT}
-
----
-
-ADDITIONAL ERROR RECOVERY RULES (the previous attempt failed — fix it):
-
-${CODE_CORRECTION_SYSTEM_PROMPT}`;
-
+  // Correction prompt is the error-recovery rules ONLY. Including the full
+  // code-gen prompt would double the system-prompt size (~6.5k tokens → ~8k
+  // tokens), and combined with the failing code + stderr context blows past
+  // Groq's free-tier 12k TPM limit. The failing code itself already encodes
+  // the constraints — the model just needs the recovery rules.
   let code = await callLLMText({
-    systemPrompt: compositeSystemPrompt,
+    systemPrompt: CODE_CORRECTION_SYSTEM_PROMPT,
     userPrompt: buildCodeCorrectionPrompt(params),
     // Slightly higher temp on later corrections to escape the stuck pattern.
     temperature: params.attemptNumber === 1 ? 0.2 : 0.4,
-    maxTokens: 4096,
+    maxTokens: 8192,
     geminiModel: process.env.GEMINI_CODE_MODEL || 'gemini-2.5-flash',
     forceProvider: provider,
   });
@@ -761,8 +808,8 @@ ${CODE_CORRECTION_SYSTEM_PROMPT}`;
 
   // Strip markdown fences if present
   code = stripMarkdownFences(code);
-  // Patch wrong class names — same self-heal as the initial generation path.
-  code = normalizeSceneClassName(code);
+  // Apply every auto-fix transform — same suite the generation path uses.
+  code = normalizeManimCode(code);
 
   if (!code.includes('class GeneratedScene')) {
     throw new Error('Corrected code missing GeneratedScene class');
@@ -805,8 +852,30 @@ function validateManimCode(code: string): string[] {
   if (/\.get_lines\s*\(/.test(code)) {
     issues.push("'.get_lines()' is not a real Manim method — build Line() objects between vertices instead");
   }
+  if (/\.to_center\s*\(/.test(code)) {
+    issues.push("'.to_center()' is not a real Mobject method — use '.move_to(ORIGIN)'");
+  }
   if (/\bCENTER\b(?!\s*=)/.test(code)) {
     issues.push("'CENTER' is not exported by Manim — use 'ORIGIN'");
+  }
+  // Hallucinated dash kwargs on shape constructors. The right way to dash a
+  // VMobject is to wrap it in DashedVMobject(circle, num_dashes=N). We strip
+  // these in normalize, but the validator stays as a safety net.
+  const BAD_DASH_KWARGS = [
+    'stroke_dash_length',
+    'dash_length',
+    'stroke_dasharray',
+    'stroke_pattern',
+    'dash_pattern',
+    'dashed',
+  ];
+  const shapeCtorPattern = /(?:Circle|Line|Square|Rectangle|Polygon|Arc|Ellipse|VMobject)\s*\(/;
+  for (const k of BAD_DASH_KWARGS) {
+    const re = new RegExp(`${shapeCtorPattern.source}[^)]*\\b${k}\\s*=`);
+    if (re.test(code)) {
+      issues.push(`'${k}=' is not a valid shape constructor kwarg — wrap the shape in DashedVMobject(shape, num_dashes=N)`);
+      break; // one report per scene is enough
+    }
   }
 
   // HTML leakage in strings (Pango/Manim won't render these)
@@ -848,6 +917,78 @@ function normalizeSceneClassName(code: string): string {
     /class\s+(\w+)\s*\(\s*([A-Z]\w*Scene)\s*\)\s*:/g,
     (full, name: string, parent: string) =>
       name === 'GeneratedScene' ? full : `class GeneratedScene(${parent}):`
+  );
+}
+
+/**
+ * Replace invented method calls with their real Manim equivalents. The LLM
+ * sometimes invents methods that sound plausible (`.to_center()`,
+ * `.center_on_screen()`) — Manim raises AttributeError at render time.
+ */
+function patchInventedMethods(code: string): string {
+  // `.to_center()` → `.move_to(ORIGIN)`
+  code = code.replace(/\.to_center\s*\(\s*\)/g, '.move_to(ORIGIN)');
+  // `.center_on_screen()` → `.move_to(ORIGIN)`
+  code = code.replace(/\.center_on_screen\s*\(\s*\)/g, '.move_to(ORIGIN)');
+  return code;
+}
+
+/**
+ * Run every auto-fix transform we have on a Manim script. Safe to call on
+ * cached code before re-rendering — each transform is idempotent and only
+ * rewrites known-broken patterns. Exported so the orchestrator can normalize
+ * persisted code on retry, not just fresh LLM output.
+ */
+export function normalizeManimCode(code: string): string {
+  code = normalizeSceneClassName(code);
+  code = stripHtmlInTextCalls(code);
+  code = stripInvalidDashKwargs(code);
+  code = patchInventedMethods(code);
+  return code;
+}
+
+/**
+ * Strip dash-related kwargs that the LLM occasionally passes to shape
+ * constructors (Circle / Line / Square / etc). These get forwarded to
+ * VMobject.set_stroke() inside Manim and crash with
+ *   TypeError: VMobject.set_stroke() got an unexpected keyword argument
+ * The correct way to dash a Mobject is `DashedVMobject(shape, num_dashes=N)`.
+ * Removing the kwarg falls back to a solid shape — visual fidelity loss is
+ * preferable to a hard render failure.
+ */
+function stripInvalidDashKwargs(code: string): string {
+  // Match `, kwarg=value` (including the leading comma + whitespace) OR
+  // `kwarg=value,` at the start of an arg list. Limited to the actual
+  // dash-related names so we don't touch valid kwargs like `dashed_ratio`
+  // on DashedVMobject.
+  const names = '(?:stroke_dash_length|dash_length|stroke_dasharray|stroke_pattern|dash_pattern|dashed)';
+  return code
+    // ", kwarg=value" inside arglist
+    .replace(new RegExp(`,\\s*${names}\\s*=\\s*[^,)\\n]+`, 'g'), '')
+    // "kwarg=value," when it's the first arg
+    .replace(new RegExp(`${names}\\s*=\\s*[^,)\\n]+,\\s*`, 'g'), '');
+}
+
+/**
+ * Strip HTML tags from Text(...) and MathTex(...) call arguments. Manim's
+ * Pango/LaTeX rendering doesn't understand them — they end up either rendered
+ * literally or breaking layout. The system prompt forbids them, but the LLM
+ * still occasionally emits `<br>`, `<b>`, etc. Rather than failing pre-render
+ * validation, we transform the code: <br>/<br/> → `\n`, other tags removed.
+ */
+function stripHtmlInTextCalls(code: string): string {
+  // <br>, <br/>, <br /> → escaped newline first so multi-line text survives.
+  code = code.replace(
+    /(Text|MathTex)\(([^)]*?)<br\s*\/?>([^)]*?)\)/gi,
+    (_m, fn: string, before: string, after: string) => `${fn}(${before}\\n${after})`
+  );
+  // Remove any remaining `<tag>` / `</tag>` patterns inside Text/MathTex args.
+  return code.replace(
+    /(Text|MathTex)\(([^)]*)\)/g,
+    (_m, fn: string, args: string) => {
+      const cleaned = args.replace(/<\/?\w+[^>]*>/g, '');
+      return `${fn}(${cleaned})`;
+    }
   );
 }
 

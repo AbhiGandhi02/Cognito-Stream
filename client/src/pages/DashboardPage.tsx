@@ -3,11 +3,15 @@
  * Ports the existing App.tsx workspace logic into a dedicated page.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+// Monaco is heavy — lazy-load so it doesn't sit in the main bundle. Mounted
+// only when the user opens a scene that has code.
+const SceneCodeViewer = lazy(() => import('../components/SceneCodeViewer'));
 import { api, type Storyboard, type Scene } from '../services/api';
 import { VideoPlayer } from '../components/VideoPlayer';
 import { CommandPalette } from '../components/CommandPalette';
+import { ThemeToggle } from '../components/ThemeToggle';
 import { useMe } from '../hooks/useMe';
 import { useAuth } from '../contexts/AuthContext';
 // Editable per-scene UI (Monaco editor + textareas) — re-enable when individual scene editing is needed.
@@ -27,32 +31,62 @@ import {
     PanelLeft,
     LogOut,
     LayoutGrid,
+    Clock,
+    Info,
+    Trash2,
+    Pencil,
+    Check,
+    X,
 } from 'lucide-react';
 
 // Curated prompt suggestions shown on the empty-state. Mix of physics and
 // maths topics — deliberately avoids the six example videos on the landing
-// page (Pythagorean theorem, Bubble Sort, Simple Pendulum, Binary Search,
-// Fourier Series, Wave Interference) so each suggestion is fresh content.
-const PROMPT_SUGGESTIONS = [
-    "Explain Newton's three laws of motion",
-    'What does a derivative actually measure?',
-    'How does an electromagnetic wave travel?',
-    'Visualize integration as area under a curve',
-    'What is the Doppler effect?',
-    'Explain matrix multiplication geometrically',
-];
+// page so each suggestion is fresh content.
+//
+// `cachedVideoUrl` is optional: once a suggestion has been pre-rendered and
+// uploaded to Supabase Storage, fill in its URL here and clicks will play
+// the cached video instead of triggering AI generation. When undefined,
+// clicking falls back to filling the prompt textarea.
+const SUGGESTIONS_BASE_URL =
+    'https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/suggestions';
+
+interface PromptSuggestion {
+    prompt: string;
+    /** Slug used for the cached mp4 in Supabase. Optional — leave undefined
+     * until the video has been generated and uploaded. */
+    slug?: string;
+    cachedVideoUrl?: string;
+}
+
+const PROMPT_SUGGESTIONS: PromptSuggestion[] = [
+    { prompt: "Explain Newton's three laws of motion", slug: 'newtons-laws' },
+    { prompt: 'What does a derivative actually measure?', slug: 'derivative-meaning' },
+    { prompt: 'How does an electromagnetic wave travel?', slug: 'electromagnetic-wave' },
+    { prompt: 'Visualize integration as area under a curve', slug: 'integration-area' },
+    { prompt: 'What is the Doppler effect?', slug: 'doppler-effect' },
+    { prompt: 'Explain matrix multiplication geometrically', slug: 'matrix-multiplication' },
+].map((s) => ({
+    ...s,
+    cachedVideoUrl: s.slug ? `${SUGGESTIONS_BASE_URL}/${s.slug}.mp4` : undefined,
+}));
+
+// Toggle this off (or per-suggestion) until each video has actually been
+// uploaded. When false, every suggestion just fills the prompt — no broken
+// modals that try to load nonexistent URLs.
+const SUGGESTIONS_CACHED = false as boolean;
 
 export function DashboardPage() {
     // ==========================================
     // STATE
     // ==========================================
     const location = useLocation();
-    // Router-state entry points:
-    //   initialPrompt → prefill the prompt textarea (from landing hero)
-    //   resumeStoryboardId → open this storyboard on mount (from /history)
-    const routeState = (location.state || {}) as { initialPrompt?: string; resumeStoryboardId?: string };
+    const params = useParams<{ storyboardId?: string }>();
+    const urlStoryboardId = params.storyboardId;
+    // Router-state entry: initialPrompt prefills the prompt textarea from the
+    // landing hero. The URL :storyboardId param is the source of truth for
+    // which storyboard is active — see the sync effect below.
+    const routeState = (location.state || {}) as { initialPrompt?: string };
     const initialPrompt = routeState.initialPrompt ?? '';
-    const resumeStoryboardId = routeState.resumeStoryboardId;
     const [prompt, setPrompt] = useState(initialPrompt);
     const [storyboards, setStoryboards] = useState<Storyboard[]>([]);
     const [storyboard, setStoryboard] = useState<Storyboard | null>(null);
@@ -70,12 +104,79 @@ export function DashboardPage() {
     // Sidebar collapse — narrows the rail to icons only when true.
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
+    // Modal state for the "play cached suggestion" flow.
+    const [cachedSuggestion, setCachedSuggestion] = useState<PromptSuggestion | null>(null);
+
+    // Sidebar delete confirmation.
+    const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+    const [deletingId, setDeletingId] = useState<string | null>(null);
+
+    // Sidebar inline rename.
+    const [editingSidebarId, setEditingSidebarId] = useState<string | null>(null);
+    const [editSidebarTitle, setEditSidebarTitle] = useState('');
+    const [savingTitleId, setSavingTitleId] = useState<string | null>(null);
+
+    const startSidebarRename = (sb: Storyboard) => {
+        setEditingSidebarId(sb.id);
+        setEditSidebarTitle(sb.title || '');
+    };
+    const cancelSidebarRename = () => {
+        setEditingSidebarId(null);
+        setEditSidebarTitle('');
+    };
+    const commitSidebarRename = async (sb: Storyboard) => {
+        const trimmed = editSidebarTitle.trim();
+        if (!trimmed || trimmed === sb.title) {
+            cancelSidebarRename();
+            return;
+        }
+        setSavingTitleId(sb.id);
+        try {
+            const updated = await api.updateStoryboard(sb.id, { title: trimmed });
+            setStoryboards((prev) => prev.map((s) => (s.id === sb.id ? { ...s, title: updated.title } : s)));
+            if (storyboard?.id === sb.id) {
+                setStoryboard((prev) => prev ? { ...prev, title: updated.title } : prev);
+            }
+            cancelSidebarRename();
+        } catch (err) {
+            setError(`Rename failed: ${(err as Error).message}`);
+        } finally {
+            setSavingTitleId(null);
+        }
+    };
+
+    const handleDeleteStoryboard = async (id: string) => {
+        setDeletingId(id);
+        try {
+            await api.deleteStoryboard(id);
+            setStoryboards((prev) => prev.filter((s) => s.id !== id));
+            // If the active storyboard was deleted, clear the workspace and URL.
+            if (storyboard?.id === id || urlStoryboardId === id) {
+                setStoryboard(null);
+                navigate('/dashboard');
+            }
+            setPendingDeleteId(null);
+        } catch (err) {
+            setError(`Delete failed: ${(err as Error).message}`);
+        } finally {
+            setDeletingId(null);
+        }
+    };
+
+    const handleSuggestionClick = (s: PromptSuggestion) => {
+        if (SUGGESTIONS_CACHED && s.cachedVideoUrl) {
+            setCachedSuggestion(s);
+        } else {
+            setPrompt(s.prompt);
+        }
+    };
+
     useEffect(() => {
-        if (initialPrompt || resumeStoryboardId) {
-            // Clear state so a refresh doesn't re-trigger the entry behavior.
+        if (initialPrompt) {
+            // Clear state so a refresh doesn't re-trigger the prompt prefill.
             window.history.replaceState({}, '');
         }
-    }, [initialPrompt, resumeStoryboardId]);
+    }, [initialPrompt]);
 
     // ==========================================
     // DATA FETCHING
@@ -103,20 +204,28 @@ export function DashboardPage() {
         }
     }, []);
 
-    // When arriving from /history with a target storyboard, open it.
+    // URL → state sync. The :storyboardId route param is the source of truth
+    // for which storyboard is active. Navigating to /dashboard/<id> (from
+    // anywhere — history page, sidebar click, refresh) fetches and loads it.
+    // Navigating to /dashboard with no id clears the workspace.
     useEffect(() => {
-        if (!resumeStoryboardId) return;
+        if (!urlStoryboardId) {
+            if (storyboard) setStoryboard(null);
+            return;
+        }
+        if (storyboard?.id === urlStoryboardId) return; // already loaded
         let active = true;
         (async () => {
             try {
-                const fresh = await api.getStoryboard(resumeStoryboardId);
+                const fresh = await api.getStoryboard(urlStoryboardId);
                 if (active) setStoryboard(fresh);
             } catch (err) {
                 if (active) setError((err as Error).message);
             }
         })();
         return () => { active = false; };
-    }, [resumeStoryboardId]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [urlStoryboardId]);
 
     useEffect(() => {
         fetchStoryboards();
@@ -128,9 +237,11 @@ export function DashboardPage() {
         if (!storyboard) return;
         // Stop polling if we already have the final video or status is failed
         if (storyboard.finalVideoUrl || storyboard.status === 'failed') return;
+        // Poll faster than the old 3s so the final video URL doesn't sit
+        // hidden for half a beat after the orchestrator writes it.
         const interval = setInterval(() => {
             refreshStoryboard(storyboard.id);
-        }, 3000);
+        }, 1500);
         return () => clearInterval(interval);
     }, [storyboard?.id, storyboard?.status, storyboard?.finalVideoUrl, refreshStoryboard]);
 
@@ -149,6 +260,8 @@ export function DashboardPage() {
             setStoryboard(sb);
             setPrompt('');
             setStoryboards((prev) => [sb, ...prev]);
+            // Reflect the new storyboard in the URL so refresh / share works.
+            navigate(`/dashboard/${sb.id}`, { replace: true });
         } catch (err) {
             setError((err as Error).message);
         } finally {
@@ -246,6 +359,33 @@ export function DashboardPage() {
         }
     };
 
+    // "Retry all failed" — run sequentially so the renderer + LLMs don't get
+    // pounded by parallel retries (the rolling pool will pick them up anyway).
+    const [retryingAll, setRetryingAll] = useState(false);
+    const handleRetryAllFailed = async () => {
+        if (!storyboard) return;
+        const failed = storyboard.scenes?.filter((s) => s.status === 'failed') || [];
+        if (failed.length === 0) return;
+        setError(undefined);
+        setRetryingAll(true);
+        try {
+            for (const s of failed) {
+                try {
+                    setRetryingSceneId(s.id);
+                    const updated = await api.regenerateScene(s.id);
+                    handleSceneUpdated(updated);
+                } catch (err) {
+                    setError(`Scene ${s.sceneNumber} retry failed: ${(err as Error).message}`);
+                    // keep going so one bad scene doesn't block the rest
+                }
+            }
+            await refreshStoryboard(storyboard.id);
+        } finally {
+            setRetryingSceneId(null);
+            setRetryingAll(false);
+        }
+    };
+
     const handleTestGenerate = async () => {
         setLoading(true);
         setError(undefined);
@@ -264,12 +404,11 @@ export function DashboardPage() {
 
     const handleSelectStoryboard = async (sb: Storyboard) => {
         setError(undefined);
-        // Show the cached row immediately so the UI feels snappy, then fetch
-        // the full storyboard to populate fields the list endpoint omits
-        // (narration, visualDescription, manimCode, videoUrl). Without this
-        // refetch the per-scene description is blank until the user clicks
-        // the manual refresh button.
+        // Show the cached row immediately so the UI feels snappy.
         setStoryboard(sb);
+        // Navigate to the storyboard's URL so refresh / share works. The URL
+        // sync effect won't refetch since storyboard.id already matches.
+        navigate(`/dashboard/${sb.id}`);
         try {
             const fresh = await api.getStoryboard(sb.id);
             setStoryboard(fresh);
@@ -283,6 +422,7 @@ export function DashboardPage() {
         setStoryboard(null);
         setPrompt('');
         setError(undefined);
+        navigate('/dashboard');
     };
 
     const handleDownload = async () => {
@@ -333,6 +473,65 @@ export function DashboardPage() {
                 onNewStoryboard={handleNewStoryboard}
                 onRetryScene={handleRetryScene}
             />
+            <CachedSuggestionModal
+                suggestion={cachedSuggestion}
+                onClose={() => setCachedSuggestion(null)}
+                onGenerateInstead={() => {
+                    if (cachedSuggestion) setPrompt(cachedSuggestion.prompt);
+                    setCachedSuggestion(null);
+                }}
+            />
+            {/* Delete confirmation modal */}
+            {pendingDeleteId && (() => {
+                const target = storyboards.find((s) => s.id === pendingDeleteId);
+                if (!target) return null;
+                const busy = deletingId === pendingDeleteId;
+                return (
+                    <div
+                        className="fixed inset-0 z-100 flex items-center justify-center px-4 py-8 bg-black/80 backdrop-blur-md"
+                        onClick={() => !busy && setPendingDeleteId(null)}
+                    >
+                        <div
+                            className="w-full max-w-md rounded-2xl border border-white/15 bg-navy-900/95 p-6 space-y-4"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <div className="flex items-start gap-3">
+                                <div className="shrink-0 w-10 h-10 rounded-full bg-danger/15 border border-danger/30 flex items-center justify-center">
+                                    <Trash2 className="w-5 h-5 text-danger" />
+                                </div>
+                                <div className="min-w-0">
+                                    <h3 className="text-base font-semibold text-slate-100">
+                                        Delete this storyboard?
+                                    </h3>
+                                    <p className="text-sm text-slate-400 mt-1">
+                                        <span className="font-medium text-slate-200">
+                                            {target.title || 'Untitled'}
+                                        </span>{' '}
+                                        and all its scenes will be permanently removed. This cannot be undone.
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center justify-end gap-2 pt-2">
+                                <button
+                                    onClick={() => setPendingDeleteId(null)}
+                                    disabled={busy}
+                                    className="btn-secondary text-sm px-4 py-2 disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={() => void handleDeleteStoryboard(target.id)}
+                                    disabled={busy}
+                                    className="text-sm px-4 py-2 rounded-lg bg-danger/15 hover:bg-danger/25 border border-danger/30 text-danger font-medium flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                >
+                                    {busy ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                                    {busy ? 'Deleting…' : 'Delete'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
             <div className="flex-1 flex min-h-0">
                 {/* ============== LEFT SIDEBAR ============== */}
                 <aside
@@ -429,27 +628,113 @@ export function DashboardPage() {
                                         No chats yet. Start a conversation to see it here.
                                     </p>
                                 ) : (
-                                    storyboards.map((sb) => (
-                                        <button
-                                            key={sb.id}
-                                            onClick={() => handleSelectStoryboard(sb)}
-                                            title={sb.title || 'Untitled'}
-                                            className={`w-full text-left rounded-lg transition-colors flex items-center gap-2 px-3 py-2 ${storyboard?.id === sb.id
-                                                ? 'bg-primary-500/10 text-primary-200'
-                                                : 'hover:bg-white/5 text-slate-300 hover:text-slate-100'
-                                                }`}
-                                        >
-                                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot(sb.status)}`} />
-                                            <span className="text-xs font-medium truncate">
-                                                {sb.title || 'Untitled'}
-                                            </span>
-                                        </button>
-                                    ))
+                                    storyboards.map((sb) => {
+                                        const isEditing = editingSidebarId === sb.id;
+                                        const isSavingTitle = savingTitleId === sb.id;
+                                        return (
+                                            <div
+                                                key={sb.id}
+                                                role={isEditing ? undefined : 'button'}
+                                                tabIndex={isEditing ? -1 : 0}
+                                                onClick={() => { if (!isEditing) handleSelectStoryboard(sb); }}
+                                                onKeyDown={(e) => {
+                                                    if (isEditing) return;
+                                                    if (e.key === 'Enter' || e.key === ' ') {
+                                                        e.preventDefault();
+                                                        handleSelectStoryboard(sb);
+                                                    }
+                                                }}
+                                                title={isEditing ? undefined : (sb.title || 'Untitled')}
+                                                className={`group relative ${isEditing ? '' : 'cursor-pointer'} rounded-lg transition-colors flex items-center gap-2 pl-3 pr-1.5 py-2 ${storyboard?.id === sb.id
+                                                    ? 'bg-primary-500/10 text-primary-200'
+                                                    : 'hover:bg-white/5 text-slate-300 hover:text-slate-100'
+                                                    }`}
+                                            >
+                                                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDot(sb.status)}`} />
+                                                {isEditing ? (
+                                                    <>
+                                                        <input
+                                                            autoFocus
+                                                            value={editSidebarTitle}
+                                                            onChange={(e) => setEditSidebarTitle(e.target.value)}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                            onKeyDown={(e) => {
+                                                                e.stopPropagation();
+                                                                if (e.key === 'Enter') {
+                                                                    e.preventDefault();
+                                                                    void commitSidebarRename(sb);
+                                                                } else if (e.key === 'Escape') {
+                                                                    e.preventDefault();
+                                                                    cancelSidebarRename();
+                                                                }
+                                                            }}
+                                                            disabled={isSavingTitle}
+                                                            className="flex-1 min-w-0 rounded bg-navy-900/70 border border-white/15 px-1.5 py-0.5 text-xs text-slate-100 focus:outline-none focus:border-white/30 disabled:opacity-50"
+                                                        />
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); void commitSidebarRename(sb); }}
+                                                            disabled={isSavingTitle}
+                                                            aria-label="Save"
+                                                            title="Save (Enter)"
+                                                            className="p-1 rounded text-success hover:bg-white/5 shrink-0 disabled:opacity-40"
+                                                        >
+                                                            {isSavingTitle ? <RefreshCcw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                                                        </button>
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); cancelSidebarRename(); }}
+                                                            disabled={isSavingTitle}
+                                                            aria-label="Cancel"
+                                                            title="Cancel (Esc)"
+                                                            className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-white/5 shrink-0"
+                                                        >
+                                                            <X className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <span className="text-xs font-medium truncate flex-1">
+                                                            {sb.title || 'Untitled'}
+                                                        </span>
+                                                        {/* Edit + delete — appear on hover. Stop propagation so
+                                                            clicking them doesn't also open the storyboard. */}
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                startSidebarRename(sb);
+                                                            }}
+                                                            aria-label="Rename storyboard"
+                                                            title="Rename"
+                                                            className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 rounded text-slate-500 hover:text-slate-100 hover:bg-white/8 transition-all shrink-0"
+                                                        >
+                                                            <Pencil className="w-3.5 h-3.5" />
+                                                        </button>
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setPendingDeleteId(sb.id);
+                                                            }}
+                                                            aria-label="Delete storyboard"
+                                                            title="Delete"
+                                                            className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 rounded text-slate-500 hover:text-danger hover:bg-danger/10 transition-all shrink-0"
+                                                        >
+                                                            <Trash2 className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </>
+                                                )}
+                                            </div>
+                                        );
+                                    })
                                 )}
                             </div>
                         </>
                     )}
                     {sidebarCollapsed && <div className="flex-1" />}
+
+                    {/* Theme toggle row */}
+                    <div className={`border-t border-white/5 ${sidebarCollapsed ? 'p-2 flex justify-center' : 'px-3 py-2 flex items-center justify-between text-xs text-slate-500'}`}>
+                        {!sidebarCollapsed && <span>Theme</span>}
+                        <ThemeToggle />
+                    </div>
 
                     {/* User card (bottom) */}
                     <div className={`border-t border-white/5 ${sidebarCollapsed ? 'p-2' : 'p-3'}`}>
@@ -544,18 +829,26 @@ export function DashboardPage() {
                             <p className="text-xs text-slate-500 px-3 pt-1 pb-2">
                                 Suggestions
                             </p>
-                            {PROMPT_SUGGESTIONS.map((s) => (
-                                <button
-                                    key={s}
-                                    onClick={() => setPrompt(s)}
-                                    className="w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 transition-colors group"
-                                >
-                                    <LayoutGrid className="w-3.5 h-3.5 text-slate-500 shrink-0 group-hover:text-slate-300 transition-colors" />
-                                    <span className="text-sm text-slate-300 group-hover:text-slate-100 transition-colors">
-                                        {s}
-                                    </span>
-                                </button>
-                            ))}
+                            {PROMPT_SUGGESTIONS.map((s) => {
+                                const willPlayCached = SUGGESTIONS_CACHED && Boolean(s.cachedVideoUrl);
+                                return (
+                                    <button
+                                        key={s.prompt}
+                                        onClick={() => handleSuggestionClick(s)}
+                                        className="w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 transition-colors group"
+                                    >
+                                        <LayoutGrid className="w-3.5 h-3.5 text-slate-500 shrink-0 group-hover:text-slate-300 transition-colors" />
+                                        <span className="flex-1 text-sm text-slate-300 group-hover:text-slate-100 transition-colors">
+                                            {s.prompt}
+                                        </span>
+                                        {willPlayCached && (
+                                            <span className="text-[10px] uppercase tracking-wider text-success/80 px-2 py-0.5 rounded-md bg-success/10 border border-success/20">
+                                                Watch
+                                            </span>
+                                        )}
+                                    </button>
+                                );
+                            })}
                         </div>
 
                         {/* Admin-only diagnostic */}
@@ -609,40 +902,119 @@ export function DashboardPage() {
                             </div>
                         )}
 
-                        {/* Compact scene list — one line per scene */}
-                        <div className="glass-card rounded-2xl p-4 space-y-1.5">
+                        {/* Estimate banner — shows from the moment Generate
+                            Code is clicked. Continues through render in the
+                            processing view below. */}
+                        {generatingAll && (
+                            <div className="glass-card rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <Clock className="w-4 h-4 text-slate-300" />
+                                    <span className="text-sm font-medium text-slate-100">
+                                        Estimated time: 3–6 minutes
+                                    </span>
+                                </div>
+                                <span className="text-xs text-slate-500 sm:border-l sm:border-white/10 sm:pl-3">
+                                    You can leave this tab open — generation continues even if you switch away.
+                                </span>
+                                {generateProgress.total > 0 && (
+                                    <span className="text-[11px] text-slate-500 sm:ml-auto font-mono">
+                                        {generateProgress.done} / {generateProgress.total}
+                                    </span>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Scene list — each row toggles open to reveal the
+                            visual description and narration. */}
+                        <div className="glass-card rounded-2xl p-3 space-y-1.5">
                             {storyboard.scenes?.map((scene) => {
                                 const hasCode =
                                     typeof scene.manimCode === 'string' &&
                                     scene.manimCode.includes('class GeneratedScene');
                                 const isCurrentlyGenerating =
                                     generatingAll && generateProgress.done === scene.sceneNumber - 1;
+                                const isExpanded = expandedSceneIds.has(scene.id);
+                                const hasDetails = Boolean(scene.visualDescription || scene.narration);
                                 return (
                                     <div
                                         key={scene.id}
-                                        className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/0.02 transition-colors"
+                                        className="rounded-lg border border-white/5 bg-white/2 overflow-hidden"
                                     >
-                                        <span className="shrink-0 w-6 h-6 rounded-full bg-navy-900/80 border border-primary-500/15 text-[11px] font-semibold text-primary-300 flex items-center justify-center">
-                                            {scene.sceneNumber}
-                                        </span>
-                                        <span className="text-sm text-slate-300 truncate flex-1">
-                                            {scene.visualDescription || scene.narration}
-                                        </span>
-                                        <span className="shrink-0 text-[11px] flex items-center gap-1">
-                                            {isCurrentlyGenerating ? (
-                                                <span className="text-primary-300 flex items-center gap-1">
-                                                    <RefreshCcw className="w-3 h-3 animate-spin" />
-                                                    Generating
-                                                </span>
-                                            ) : hasCode ? (
-                                                <span className="text-success flex items-center gap-1">
-                                                    <CheckCircle2 className="w-3 h-3" />
-                                                    Code ready
-                                                </span>
-                                            ) : (
-                                                <span className="text-slate-600">Pending</span>
+                                        <button
+                                            type="button"
+                                            onClick={() => hasDetails && toggleSceneExpanded(scene.id)}
+                                            disabled={!hasDetails}
+                                            aria-expanded={isExpanded}
+                                            className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-white/3 transition-colors disabled:cursor-default"
+                                        >
+                                            <span className="shrink-0 w-6 h-6 rounded-full bg-navy-900/80 border border-primary-500/15 text-[11px] font-semibold text-primary-300 flex items-center justify-center">
+                                                {scene.sceneNumber}
+                                            </span>
+                                            <span className="text-sm text-slate-300 truncate flex-1">
+                                                {scene.visualDescription || scene.narration || <span className="italic text-slate-600">(no description)</span>}
+                                            </span>
+                                            <span className="shrink-0 text-[11px] flex items-center gap-1">
+                                                {isCurrentlyGenerating ? (
+                                                    <span className="text-primary-300 flex items-center gap-1">
+                                                        <RefreshCcw className="w-3 h-3 animate-spin" />
+                                                        Generating
+                                                    </span>
+                                                ) : hasCode ? (
+                                                    <span className="text-success flex items-center gap-1">
+                                                        <CheckCircle2 className="w-3 h-3" />
+                                                        Code ready
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-slate-600">Pending</span>
+                                                )}
+                                            </span>
+                                            {hasDetails && (
+                                                <ChevronDown
+                                                    className={`shrink-0 w-4 h-4 text-slate-500 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                                                />
                                             )}
-                                        </span>
+                                        </button>
+
+                                        {isExpanded && hasDetails && (
+                                            <div className="px-4 pb-3 pt-2 space-y-3 border-t border-white/5">
+                                                {scene.visualDescription && (
+                                                    <div>
+                                                        <p className="text-[10px] font-semibold text-primary-300 uppercase tracking-wider mb-1">
+                                                            Visual
+                                                        </p>
+                                                        <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-wrap">
+                                                            {scene.visualDescription}
+                                                        </p>
+                                                    </div>
+                                                )}
+                                                {scene.narration && (
+                                                    <div>
+                                                        <p className="text-[10px] font-semibold text-primary-300 uppercase tracking-wider mb-1">
+                                                            Narration
+                                                        </p>
+                                                        <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-wrap">
+                                                            {scene.narration}
+                                                        </p>
+                                                    </div>
+                                                )}
+                                                {hasCode && (
+                                                    <div>
+                                                        <p className="text-[10px] font-semibold text-primary-300 uppercase tracking-wider mb-1.5">
+                                                            Manim code (read-only)
+                                                        </p>
+                                                        <Suspense
+                                                            fallback={
+                                                                <div className="h-40 rounded-lg border border-white/10 bg-[#0a0a0a] flex items-center justify-center text-xs text-slate-500">
+                                                                    Loading editor…
+                                                                </div>
+                                                            }
+                                                        >
+                                                            <SceneCodeViewer code={scene.manimCode} />
+                                                        </Suspense>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 );
                             })}
@@ -728,13 +1100,17 @@ export function DashboardPage() {
                                         {storyboard.description}
                                     </p>
                                 </div>
-                                <button
-                                    onClick={() => refreshStoryboard(storyboard.id)}
-                                    className="p-2 rounded-lg text-slate-500 hover:text-primary-300 hover:bg-white/5 transition-colors shrink-0"
-                                    title="Refresh"
-                                >
-                                    <RefreshCcw className="w-4 h-4" />
-                                </button>
+                                {/* Refresh only while we're waiting for the
+                                    final video; hide once it's ready. */}
+                                {!storyboard.finalVideoUrl && (
+                                    <button
+                                        onClick={() => refreshStoryboard(storyboard.id)}
+                                        className="p-2 rounded-lg text-slate-500 hover:text-primary-300 hover:bg-white/5 transition-colors shrink-0"
+                                        title="Refresh"
+                                    >
+                                        <RefreshCcw className="w-4 h-4" />
+                                    </button>
+                                )}
                             </div>
 
                             {/* Status badge */}
@@ -775,6 +1151,19 @@ export function DashboardPage() {
                             const activeStageIdx = isAssembling ? 4 : completedScenes < totalScenes ? 2 : 4;
                             return (
                                 <div className="glass-card rounded-2xl p-5 space-y-5">
+                                    {/* Estimate banner */}
+                                    <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 rounded-xl border border-white/10 bg-white/3 px-4 py-3">
+                                        <div className="flex items-center gap-2 shrink-0">
+                                            <Clock className="w-4 h-4 text-slate-300" />
+                                            <span className="text-sm font-medium text-slate-100">
+                                                Estimated time: 3–6 minutes
+                                            </span>
+                                        </div>
+                                        <span className="text-xs text-slate-500 sm:border-l sm:border-white/10 sm:pl-3">
+                                            You can leave this tab open — generation continues even if you switch away.
+                                        </span>
+                                    </div>
+
                                     {/* Stage strip */}
                                     <div className="flex items-center justify-between gap-2">
                                         {stages.map((stage, idx) => {
@@ -851,6 +1240,30 @@ export function DashboardPage() {
                                                 ? 'Warming up the renderer…'
                                                 : `${completedScenes} scene${completedScenes === 1 ? '' : 's'} done — keep going`}
                                     </p>
+
+                                    {/* "Did you know?" tip — rotates as scenes complete so the
+                                        user sees a fresh fact every minute or so. Deterministic
+                                        index, no timer or extra state. */}
+                                    {(() => {
+                                        const TIPS = [
+                                            'Manim is the open-source engine 3Blue1Brown uses for math animations.',
+                                            'Each scene renders independently — a failure only retries that one scene.',
+                                            'Narration runs locally via Piper TTS, so generation never blocks on a vendor API.',
+                                            'If a scene fails, its Manim code is still saved — you can inspect what the LLM tried.',
+                                            'Up to 6 scenes render in parallel, cutting wall-clock time dramatically.',
+                                            'The LLM cascade falls through OpenRouter → Gemini → Groq if one provider is rate-limited.',
+                                        ];
+                                        const tip = TIPS[(completedScenes + (isAssembling ? 1 : 0)) % TIPS.length];
+                                        return (
+                                            <div className="flex items-start gap-2 rounded-lg border border-white/8 bg-white/2 px-3 py-2.5">
+                                                <Info className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                                                <p className="text-[11px] text-slate-400 leading-relaxed">
+                                                    <span className="text-slate-300 font-medium">Did you know?</span>{' '}
+                                                    {tip}
+                                                </p>
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
                             );
                         })()}
@@ -868,22 +1281,50 @@ export function DashboardPage() {
                                 <p className="text-sm text-danger">
                                     ❌ Video generation failed. Some scenes could not be rendered.
                                 </p>
-                                <button
-                                    onClick={() => refreshStoryboard(storyboard.id)}
-                                    className="btn-secondary text-sm px-4 py-2"
-                                >
-                                    <RefreshCcw className="w-4 h-4 inline mr-1" />
-                                    Refresh Status
-                                </button>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    {(storyboard.scenes?.filter((s) => s.status === 'failed').length || 0) > 0 && (
+                                        <button
+                                            onClick={handleRetryAllFailed}
+                                            disabled={retryingAll || retryingSceneId !== null}
+                                            className="btn-primary text-sm px-4 py-2 flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            <RefreshCcw className={`w-4 h-4 ${retryingAll ? 'animate-spin' : ''}`} />
+                                            {retryingAll
+                                                ? `Retrying ${storyboard.scenes?.filter((s) => s.status === 'failed').length || 0}…`
+                                                : `Retry all failed (${storyboard.scenes?.filter((s) => s.status === 'failed').length || 0})`}
+                                        </button>
+                                    )}
+                                    <button
+                                        onClick={() => refreshStoryboard(storyboard.id)}
+                                        className="btn-secondary text-sm px-4 py-2"
+                                    >
+                                        <RefreshCcw className="w-4 h-4 inline mr-1" />
+                                        Refresh Status
+                                    </button>
+                                </div>
                             </div>
                         )}
 
                         {/* Scene breakdown */}
                         {storyboard.scenes && storyboard.scenes.length > 0 && (
                             <div className="glass-card rounded-2xl p-5 space-y-3">
-                                <h3 className="text-sm font-semibold text-slate-400">
-                                    📋 Scene Breakdown
-                                </h3>
+                                <div className="flex items-center justify-between gap-3 flex-wrap">
+                                    <h3 className="text-sm font-semibold text-slate-400">
+                                        📋 Scene Breakdown
+                                    </h3>
+                                    {(storyboard.scenes.filter((s) => s.status === 'failed').length > 0) && (
+                                        <button
+                                            onClick={handleRetryAllFailed}
+                                            disabled={retryingAll || retryingSceneId !== null}
+                                            className="text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary-500/10 hover:bg-primary-500/20 border border-primary-500/20 text-primary-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                        >
+                                            <RefreshCcw className={`w-3.5 h-3.5 ${retryingAll ? 'animate-spin' : ''}`} />
+                                            {retryingAll
+                                                ? `Retrying ${storyboard.scenes.filter((s) => s.status === 'failed').length}…`
+                                                : `Retry all failed (${storyboard.scenes.filter((s) => s.status === 'failed').length})`}
+                                        </button>
+                                    )}
+                                </div>
                                 <div className="space-y-2">
                                     {storyboard.scenes.map((scene) => {
                                         const isExpanded = expandedSceneIds.has(scene.id);
@@ -970,25 +1411,54 @@ export function DashboardPage() {
                                                                 </p>
                                                             </div>
                                                         )}
+                                                        {typeof scene.manimCode === 'string' && scene.manimCode.includes('class GeneratedScene') && (
+                                                            <div>
+                                                                <p className="text-[10px] font-semibold text-primary-300 uppercase tracking-wider mb-1.5">
+                                                                    Manim code (read-only)
+                                                                </p>
+                                                                <Suspense
+                                                                    fallback={
+                                                                        <div className="h-40 rounded-lg border border-white/10 bg-[#0a0a0a] flex items-center justify-center text-xs text-slate-500">
+                                                                            Loading editor…
+                                                                        </div>
+                                                                    }
+                                                                >
+                                                                    <SceneCodeViewer code={scene.manimCode} />
+                                                                </Suspense>
+                                                            </div>
+                                                        )}
                                                         {scene.status === 'failed' && (
-                                                            <button
-                                                                onClick={(e) => { e.stopPropagation(); handleRetryScene(scene.id); }}
-                                                                disabled={retryingSceneId !== null}
-                                                                className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md bg-primary-500/10 hover:bg-primary-500/20 border border-primary-500/20 text-primary-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                                                title="Re-run the full pipeline for this scene"
-                                                            >
-                                                                {retryingSceneId === scene.id ? (
-                                                                    <>
-                                                                        <RefreshCcw className="w-3 h-3 animate-spin" />
-                                                                        Retrying
-                                                                    </>
-                                                                ) : (
-                                                                    <>
-                                                                        <RefreshCcw className="w-3 h-3" />
-                                                                        Retry
-                                                                    </>
+                                                            <div className="space-y-2">
+                                                                {scene.errorMessage && (
+                                                                    <details className="rounded-lg border border-danger/20 bg-danger/5 px-3 py-2 group">
+                                                                        <summary className="text-[11px] font-semibold text-danger cursor-pointer list-none flex items-center justify-between">
+                                                                            <span>Error message</span>
+                                                                            <span className="text-[10px] text-danger/70 group-open:hidden">click to expand</span>
+                                                                        </summary>
+                                                                        <pre className="text-[10px] text-danger/90 font-mono whitespace-pre-wrap break-words mt-2 max-h-48 overflow-y-auto">
+                                                                            {scene.errorMessage}
+                                                                        </pre>
+                                                                    </details>
                                                                 )}
-                                                            </button>
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); handleRetryScene(scene.id); }}
+                                                                    disabled={retryingSceneId !== null}
+                                                                    className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md bg-primary-500/10 hover:bg-primary-500/20 border border-primary-500/20 text-primary-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                                                    title="Re-run the full pipeline for this scene"
+                                                                >
+                                                                    {retryingSceneId === scene.id ? (
+                                                                        <>
+                                                                            <RefreshCcw className="w-3 h-3 animate-spin" />
+                                                                            Retrying
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            <RefreshCcw className="w-3 h-3" />
+                                                                            Retry
+                                                                        </>
+                                                                    )}
+                                                                </button>
+                                                            </div>
                                                         )}
                                                     </div>
                                                 )}
@@ -1007,6 +1477,7 @@ export function DashboardPage() {
                                 </h3>
                                 <div className="space-y-3">
                                     <VideoPlayer
+                                        key={storyboard.finalVideoUrl}
                                         videoUrl={storyboard.finalVideoUrl}
                                         title={storyboard.title}
                                         className="aspect-video"
@@ -1076,5 +1547,78 @@ function SidebarNavItem({
                 </>
             )}
         </button>
+    );
+}
+
+// ==========================================
+// CACHED SUGGESTION MODAL
+// ==========================================
+
+/** Plays the pre-rendered suggestion video in a modal. ESC closes; clicking
+ * outside closes; "Generate fresh instead" routes back to the prompt input. */
+function CachedSuggestionModal({
+    suggestion,
+    onClose,
+    onGenerateInstead,
+}: {
+    suggestion: PromptSuggestion | null;
+    onClose: () => void;
+    onGenerateInstead: () => void;
+}) {
+    useEffect(() => {
+        if (!suggestion) return;
+        const handler = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') onClose();
+        };
+        document.addEventListener('keydown', handler);
+        return () => document.removeEventListener('keydown', handler);
+    }, [suggestion, onClose]);
+
+    if (!suggestion || !suggestion.cachedVideoUrl) return null;
+
+    return (
+        <div
+            className="fixed inset-0 z-100 flex items-center justify-center px-4 py-8 bg-black/85 backdrop-blur-md"
+            onClick={onClose}
+        >
+            <div
+                className="w-full max-w-4xl rounded-2xl overflow-hidden border border-white/15 bg-navy-900 force-dark-controls"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
+                    <h3 className="text-sm md:text-base font-semibold text-slate-100 truncate">
+                        {suggestion.prompt}
+                    </h3>
+                    <button
+                        onClick={onClose}
+                        className="p-2 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-white/5 transition-colors"
+                        title="Close (Esc)"
+                        aria-label="Close"
+                    >
+                        ×
+                    </button>
+                </div>
+                <div className="aspect-video bg-black">
+                    <video
+                        key={suggestion.cachedVideoUrl}
+                        src={suggestion.cachedVideoUrl}
+                        controls
+                        autoPlay
+                        className="w-full h-full"
+                    >
+                        Your browser does not support the video tag.
+                    </video>
+                </div>
+                <div className="flex items-center justify-between px-5 py-3 border-t border-white/10 text-xs text-slate-400">
+                    <span>Pre-generated example — instant, no AI cost.</span>
+                    <button
+                        onClick={onGenerateInstead}
+                        className="text-slate-300 hover:text-white transition-colors"
+                    >
+                        Generate a fresh version →
+                    </button>
+                </div>
+            </div>
+        </div>
     );
 }

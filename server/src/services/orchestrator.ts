@@ -12,7 +12,7 @@
  */
 
 import { prisma } from '../lib/prisma';
-import { generateManimSceneCode, correctManimCode } from './gemini';
+import { generateManimSceneCode, correctManimCode, normalizeManimCode } from './gemini';
 import { triggerRendererWithCode } from './renderer';
 import { generateAudio } from './elevenlabs';
 
@@ -90,45 +90,56 @@ export async function processStoryboardScenes(
     // continuity (same example array, same notation, same variables across scenes).
     const sceneSummaries: string[] = [];
 
-    // Process scenes in batches for controlled concurrency
-    for (let i = 0; i < storyboard.scenes.length; i += PARALLEL_CONCURRENCY) {
-        const batch = storyboard.scenes.slice(i, i + PARALLEL_CONCURRENCY);
-        const previousSceneContext = sceneSummaries.join('\n');
-
-        const batchResults = await Promise.allSettled(
-            batch.map((scene) =>
-                processScene(
+    // Rolling worker pool — keep PARALLEL_CONCURRENCY scenes in flight at any
+    // moment. As soon as a scene finishes, the next pending one starts. This
+    // is strictly better than batched concurrency: the slowest scene in batch N
+    // no longer blocks batch N+1 from starting.
+    // Hoist the bits of storyboard the closures need so TS doesn't lose null
+    // narrowing across the worker function boundary.
+    const sbPrompt = storyboard.prompt;
+    const sbTitle = storyboard.title;
+    let cursor = 0;
+    const queue = storyboard.scenes;
+    async function worker() {
+        while (true) {
+            const idx = cursor++;
+            if (idx >= queue.length) return;
+            const scene = queue[idx];
+            // Snapshot the running summaries at task start. Slightly racy with
+            // other workers, but the only effect is that some scenes may not
+            // see siblings that started microseconds earlier — acceptable.
+            const previousSceneContext = sceneSummaries.join('\n');
+            try {
+                const result = await processScene(
                     scene,
-                    storyboard.prompt,
-                    storyboard.title,
+                    sbPrompt,
+                    sbTitle,
                     totalScenes,
                     previousSceneContext
-                )
-            )
-        );
-
-        for (const result of batchResults) {
-            if (result.status === 'fulfilled') {
-                results.push(result.value);
-                // Add a brief summary of this scene for downstream scenes' context.
-                const sourceScene = batch.find((s) => s.id === result.value.sceneId);
-                if (sourceScene && result.value.status === 'completed') {
+                );
+                results.push(result);
+                if (result.status === 'completed') {
                     sceneSummaries.push(
-                        `Scene ${sourceScene.sceneNumber} ("${sourceScene.visualDescription.slice(0, 80)}"): ${sourceScene.narration.slice(0, 200)}`
+                        `Scene ${scene.sceneNumber} ("${scene.visualDescription.slice(0, 80)}"): ${scene.narration.slice(0, 200)}`
                     );
                 }
-            } else {
-                // This shouldn't happen since processScene catches errors internally
+            } catch (err) {
+                // processScene already catches its own errors, but guard the
+                // pool against an unexpected throw so one bad scene doesn't
+                // kill an entire worker.
                 results.push({
-                    sceneId: 'unknown',
-                    sceneNumber: 0,
+                    sceneId: scene.id,
+                    sceneNumber: scene.sceneNumber,
                     status: 'failed',
                     correctionAttempts: 0,
-                    error: result.reason?.message || 'Unknown error',
+                    error: (err as Error)?.message || 'Unknown error',
                 });
             }
         }
     }
+
+    const concurrency = Math.min(PARALLEL_CONCURRENCY, queue.length);
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
     // Aggregate results
     const completedScenes = results.filter((r) => r.status === 'completed').length;
@@ -207,7 +218,10 @@ export async function processScene(
         // If the scene already has a complete Manim script, skip AI generation
         if (scene.manimCode && scene.manimCode.includes('class GeneratedScene')) {
             console.log(`♻️ [${sceneLabel}] Using pre-stored Manim code (no AI call)`);
-            manimCode = scene.manimCode;
+            // Apply auto-fix transforms to the cached code too — older
+            // storyboards may have buggy code persisted before the transforms
+            // existed. Idempotent: a clean script passes through unchanged.
+            manimCode = normalizeManimCode(scene.manimCode);
         } else {
             console.log(`🎨 [${sceneLabel}] Generating Manim code via AI...`);
 
@@ -232,6 +246,15 @@ export async function processScene(
                 overallTopic,
                 previousSceneContext: previousSceneContext || undefined,
             });
+
+            // Persist the freshly generated code BEFORE attempting render so a
+            // render failure doesn't lose what we got from the LLM. The final
+            // write at the bottom of this function will overwrite this with
+            // the corrected version if the correction loop runs.
+            await prisma.scene.update({
+                where: { id: scene.id },
+                data: { manimCode },
+            });
         }
 
         // --- Step 2: Render with correction loop ---
@@ -252,16 +275,39 @@ export async function processScene(
                     attemptNumber: correctionAttempts,
                 });
 
+                // Persist the corrected code so it's recoverable even if the
+                // upcoming render attempt fails.
+                await prisma.scene.update({
+                    where: { id: scene.id },
+                    data: { manimCode },
+                });
+
                 renderResult = await triggerRendererWithCode(scene.id, manimCode);
             } catch (correctionError) {
-                console.error(`❌ [${sceneLabel}] Code correction failed:`, correctionError);
+                // Log just the message — the cascade already sanitizes provider
+                // errors into one-liners, but a stray axios object could still
+                // dump its entire request payload if printed directly.
+                const msg = String((correctionError as Error)?.message ?? correctionError).slice(0, 300);
+                console.error(`❌ [${sceneLabel}] Code correction failed: ${msg}`);
                 // Continue loop — next attempt may succeed
             }
         }
 
         if (!renderResult.success) {
+            // Surface the actual stderr/stdout from the renderer so the UI can
+            // show the real cause (e.g. TypeError about an invalid kwarg)
+            // instead of the generic "Manim rendering failed".
+            const stderr = (renderResult.detailsStderr || '').trim();
+            const stdout = (renderResult.detailsStdout || '').trim();
+            const summary = renderResult.error || 'Manim rendering failed';
+            // Tail of stderr is almost always the most useful chunk (the
+            // Python traceback ends there). Stdout is included only if stderr
+            // is empty.
+            const tail = stderr
+                ? stderr.split('\n').slice(-25).join('\n')
+                : stdout.split('\n').slice(-15).join('\n');
             throw new Error(
-                `Rendering failed after ${correctionAttempts} correction attempts: ${renderResult.error}`
+                `Rendering failed after ${correctionAttempts} correction attempts: ${summary}\n\n${tail}`.slice(0, 2000)
             );
         }
 

@@ -72,7 +72,7 @@ export function AuthPage({ mode }: AuthPageProps) {
                 <button
                     onClick={handleGoogle}
                     disabled={submitting}
-                    className="w-full flex items-center justify-center gap-3 rounded-lg bg-white text-slate-900 font-medium text-sm py-3 hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full flex items-center justify-center gap-3 rounded-lg bg-white text-slate-900 font-medium text-sm py-3 border border-white/15 hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                     {submitting ? (
                         <>

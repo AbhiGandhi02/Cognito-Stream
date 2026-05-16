@@ -16,6 +16,23 @@ const CATEGORY_BADGE: Record<string, string> = {
     Algorithms: 'bg-emerald-500/15 text-emerald-200 border-emerald-400/30',
 };
 
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+
+/** Resolves an example to a concrete video URL. Returns null while loading or
+ *  if the storyboard hasn't finished rendering (entry is then hidden). */
+async function resolveExampleUrl(video: ExampleVideo): Promise<string | null> {
+    if (video.videoUrl) return video.videoUrl;
+    if (!video.storyboardId) return null;
+    try {
+        const res = await fetch(`${API_BASE}/api/public/storyboard/${video.storyboardId}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data.finalVideoUrl ?? null;
+    } catch {
+        return null;
+    }
+}
+
 function ExampleCard({ video, onPlay }: { video: ExampleVideo; onPlay: (v: ExampleVideo) => void }) {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [metadataLoaded, setMetadataLoaded] = useState(false);
@@ -198,6 +215,30 @@ function VideoModal({ video, onClose }: { video: ExampleVideo; onClose: () => vo
 
 export function ExamplesSection() {
     const [openVideo, setOpenVideo] = useState<ExampleVideo | null>(null);
+    // Map of example.id → resolved video URL. Examples without a resolved URL
+    // are hidden from the grid (e.g. storyboard hasn't finished rendering yet).
+    const [resolvedUrls, setResolvedUrls] = useState<Record<string, string>>({});
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            const entries = await Promise.all(
+                EXAMPLE_VIDEOS.map(async (v) => [v.id, await resolveExampleUrl(v)] as const)
+            );
+            if (cancelled) return;
+            const map: Record<string, string> = {};
+            for (const [id, url] of entries) {
+                if (url) map[id] = url;
+            }
+            setResolvedUrls(map);
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
+    // Only render examples whose video URL has been resolved.
+    const visibleExamples = EXAMPLE_VIDEOS
+        .filter((v) => resolvedUrls[v.id])
+        .map((v) => ({ ...v, videoUrl: resolvedUrls[v.id] }));
 
     return (
         <section id="examples" className="relative px-6 py-14 max-w-6xl mx-auto">
@@ -218,7 +259,7 @@ export function ExamplesSection() {
             </div>
 
             <div className="relative grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-                {EXAMPLE_VIDEOS.map((video) => (
+                {visibleExamples.map((video) => (
                     <ExampleCard key={video.id} video={video} onPlay={setOpenVideo} />
                 ))}
             </div>
