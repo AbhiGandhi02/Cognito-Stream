@@ -17,7 +17,6 @@ import { useAuth } from '../contexts/AuthContext';
 // Editable per-scene UI (Monaco editor + textareas) — re-enable when individual scene editing is needed.
 // import { SceneCard } from '../components/SceneCard';
 import {
-    Sparkles,
     Download,
     RefreshCcw,
     FlaskConical,
@@ -39,41 +38,28 @@ import {
     X,
 } from 'lucide-react';
 
-// Curated prompt suggestions shown on the empty-state. Mix of physics and
-// maths topics — deliberately avoids the six example videos on the landing
-// page so each suggestion is fresh content.
+// Curated prompt suggestions shown on the empty-state.
 //
-// `cachedVideoUrl` is optional: once a suggestion has been pre-rendered and
-// uploaded to Supabase Storage, fill in its URL here and clicks will play
-// the cached video instead of triggering AI generation. When undefined,
-// clicking falls back to filling the prompt textarea.
-const SUGGESTIONS_BASE_URL =
-    'https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/suggestions';
-
+// When `storyboardId` is set, clicking the suggestion navigates to
+// /dashboard/<id>?replay=1 and the dashboard runs in replay mode — same UI
+// as a real generation (scene list → Generate Code → Render Final Video)
+// but every button is a no-op that just walks the user through the stages.
+// No LLM, no renderer, no DB writes. Falls back to prompt-fill when
+// storyboardId is undefined.
 interface PromptSuggestion {
     prompt: string;
-    /** Slug used for the cached mp4 in Supabase. Optional — leave undefined
-     * until the video has been generated and uploaded. */
-    slug?: string;
-    cachedVideoUrl?: string;
+    /** Pre-rendered storyboard ID. Click → /dashboard/<id>?replay=1. */
+    storyboardId?: string;
 }
 
 const PROMPT_SUGGESTIONS: PromptSuggestion[] = [
-    { prompt: "Explain Newton's three laws of motion", slug: 'newtons-laws' },
-    { prompt: 'What does a derivative actually measure?', slug: 'derivative-meaning' },
-    { prompt: 'How does an electromagnetic wave travel?', slug: 'electromagnetic-wave' },
-    { prompt: 'Visualize integration as area under a curve', slug: 'integration-area' },
-    { prompt: 'What is the Doppler effect?', slug: 'doppler-effect' },
-    { prompt: 'Explain matrix multiplication geometrically', slug: 'matrix-multiplication' },
-].map((s) => ({
-    ...s,
-    cachedVideoUrl: s.slug ? `${SUGGESTIONS_BASE_URL}/${s.slug}.mp4` : undefined,
-}));
-
-// Toggle this off (or per-suggestion) until each video has actually been
-// uploaded. When false, every suggestion just fills the prompt — no broken
-// modals that try to load nonexistent URLs.
-const SUGGESTIONS_CACHED = false as boolean;
+    { prompt: "Explain Newton's three laws of motion", storyboardId: 'cmp8uqube0002ypfom8ymvuob' },
+    { prompt: 'What does a derivative actually measure?', storyboardId: 'cmp8vdg7l0002ijcuhql2ryhz' },
+    { prompt: 'How does an electromagnetic wave travel?', storyboardId: 'cmp8vwvh3000rijcu4tywv2v1' },
+    { prompt: 'Visualize integration as area under a curve', storyboardId: 'cmp8y9ll20002ak5ldklfn1rj' },
+    { prompt: 'What is the Doppler effect?', storyboardId: 'cmpa3b7350002104f96a6nb9c' },
+    { prompt: 'Explain matrix multiplication geometrically', storyboardId: 'cmpa56rzn000d104f5k06jd31' },
+];
 
 export function DashboardPage() {
     // ==========================================
@@ -103,9 +89,6 @@ export function DashboardPage() {
 
     // Sidebar collapse — narrows the rail to icons only when true.
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-
-    // Modal state for the "play cached suggestion" flow.
-    const [cachedSuggestion, setCachedSuggestion] = useState<PromptSuggestion | null>(null);
 
     // Sidebar delete confirmation.
     const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
@@ -163,12 +146,16 @@ export function DashboardPage() {
         }
     };
 
+    // Hidden hint to the create endpoint — set when the user picks a
+    // suggestion that has a pre-rendered source. Server uses it (or an
+    // exact prompt match) to clone the source instead of calling the LLM.
+    // Cleared whenever the user edits the prompt, so a paraphrase falls back
+    // to real generation.
+    const [pendingDemoSourceId, setPendingDemoSourceId] = useState<string | null>(null);
+
     const handleSuggestionClick = (s: PromptSuggestion) => {
-        if (SUGGESTIONS_CACHED && s.cachedVideoUrl) {
-            setCachedSuggestion(s);
-        } else {
-            setPrompt(s.prompt);
-        }
+        setPrompt(s.prompt);
+        setPendingDemoSourceId(s.storyboardId ?? null);
     };
 
     useEffect(() => {
@@ -206,8 +193,10 @@ export function DashboardPage() {
 
     // URL → state sync. The :storyboardId route param is the source of truth
     // for which storyboard is active. Navigating to /dashboard/<id> (from
-    // anywhere — history page, sidebar click, refresh) fetches and loads it.
-    // Navigating to /dashboard with no id clears the workspace.
+    // anywhere — history page, sidebar click, refresh, suggestion replay)
+    // fetches and loads it. Navigating to /dashboard with no id clears the
+    // workspace. If the auth'd lookup 404s (storyboard belongs to another
+    // user, e.g. an official suggestion), falls back to the public endpoint.
     useEffect(() => {
         if (!urlStoryboardId) {
             if (storyboard) setStoryboard(null);
@@ -256,9 +245,14 @@ export function DashboardPage() {
         try {
             // Two-step flow: create the storyboard in draft mode (no auto-render).
             // User reviews/edits scenes + Manim code, then clicks "Render Full Video".
-            const sb = await api.createStoryboard({ prompt, autoGenerate: false });
+            const sb = await api.createStoryboard({
+                prompt,
+                autoGenerate: false,
+                demoStoryboardId: pendingDemoSourceId ?? undefined,
+            });
             setStoryboard(sb);
             setPrompt('');
+            setPendingDemoSourceId(null);
             setStoryboards((prev) => [sb, ...prev]);
             // Reflect the new storyboard in the URL so refresh / share works.
             navigate(`/dashboard/${sb.id}`, { replace: true });
@@ -472,14 +466,6 @@ export function DashboardPage() {
                 onSelectStoryboard={(sb) => { void handleSelectStoryboard(sb); }}
                 onNewStoryboard={handleNewStoryboard}
                 onRetryScene={handleRetryScene}
-            />
-            <CachedSuggestionModal
-                suggestion={cachedSuggestion}
-                onClose={() => setCachedSuggestion(null)}
-                onGenerateInstead={() => {
-                    if (cachedSuggestion) setPrompt(cachedSuggestion.prompt);
-                    setCachedSuggestion(null);
-                }}
             />
             {/* Delete confirmation modal */}
             {pendingDeleteId && (() => {
@@ -790,7 +776,12 @@ export function DashboardPage() {
                                 rows={2}
                                 placeholder="Ask a question (will generate video)…"
                                 value={prompt}
-                                onChange={(e) => setPrompt(e.target.value)}
+                                onChange={(e) => {
+                                    setPrompt(e.target.value);
+                                    // User edited away from the suggestion text — drop
+                                    // the demo hint so a paraphrase goes to real LLM.
+                                    if (pendingDemoSourceId) setPendingDemoSourceId(null);
+                                }}
                                 onKeyDown={(e) => {
                                     if (e.key === 'Enter' && !e.shiftKey) {
                                         e.preventDefault();
@@ -829,26 +820,18 @@ export function DashboardPage() {
                             <p className="text-xs text-slate-500 px-3 pt-1 pb-2">
                                 Suggestions
                             </p>
-                            {PROMPT_SUGGESTIONS.map((s) => {
-                                const willPlayCached = SUGGESTIONS_CACHED && Boolean(s.cachedVideoUrl);
-                                return (
-                                    <button
-                                        key={s.prompt}
-                                        onClick={() => handleSuggestionClick(s)}
-                                        className="w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 transition-colors group"
-                                    >
-                                        <LayoutGrid className="w-3.5 h-3.5 text-slate-500 shrink-0 group-hover:text-slate-300 transition-colors" />
-                                        <span className="flex-1 text-sm text-slate-300 group-hover:text-slate-100 transition-colors">
-                                            {s.prompt}
-                                        </span>
-                                        {willPlayCached && (
-                                            <span className="text-[10px] uppercase tracking-wider text-success/80 px-2 py-0.5 rounded-md bg-success/10 border border-success/20">
-                                                Watch
-                                            </span>
-                                        )}
-                                    </button>
-                                );
-                            })}
+                            {PROMPT_SUGGESTIONS.map((s) => (
+                                <button
+                                    key={s.prompt}
+                                    onClick={() => handleSuggestionClick(s)}
+                                    className="w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 transition-colors group"
+                                >
+                                    <LayoutGrid className="w-3.5 h-3.5 text-slate-500 shrink-0 group-hover:text-slate-300 transition-colors" />
+                                    <span className="flex-1 text-sm text-slate-300 group-hover:text-slate-100 transition-colors">
+                                        {s.prompt}
+                                    </span>
+                                </button>
+                            ))}
                         </div>
 
                         {/* Admin-only diagnostic */}
@@ -1550,75 +1533,3 @@ function SidebarNavItem({
     );
 }
 
-// ==========================================
-// CACHED SUGGESTION MODAL
-// ==========================================
-
-/** Plays the pre-rendered suggestion video in a modal. ESC closes; clicking
- * outside closes; "Generate fresh instead" routes back to the prompt input. */
-function CachedSuggestionModal({
-    suggestion,
-    onClose,
-    onGenerateInstead,
-}: {
-    suggestion: PromptSuggestion | null;
-    onClose: () => void;
-    onGenerateInstead: () => void;
-}) {
-    useEffect(() => {
-        if (!suggestion) return;
-        const handler = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') onClose();
-        };
-        document.addEventListener('keydown', handler);
-        return () => document.removeEventListener('keydown', handler);
-    }, [suggestion, onClose]);
-
-    if (!suggestion || !suggestion.cachedVideoUrl) return null;
-
-    return (
-        <div
-            className="fixed inset-0 z-100 flex items-center justify-center px-4 py-8 bg-black/85 backdrop-blur-md"
-            onClick={onClose}
-        >
-            <div
-                className="w-full max-w-4xl rounded-2xl overflow-hidden border border-white/15 bg-navy-900 force-dark-controls"
-                onClick={(e) => e.stopPropagation()}
-            >
-                <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
-                    <h3 className="text-sm md:text-base font-semibold text-slate-100 truncate">
-                        {suggestion.prompt}
-                    </h3>
-                    <button
-                        onClick={onClose}
-                        className="p-2 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-white/5 transition-colors"
-                        title="Close (Esc)"
-                        aria-label="Close"
-                    >
-                        ×
-                    </button>
-                </div>
-                <div className="aspect-video bg-black">
-                    <video
-                        key={suggestion.cachedVideoUrl}
-                        src={suggestion.cachedVideoUrl}
-                        controls
-                        autoPlay
-                        className="w-full h-full"
-                    >
-                        Your browser does not support the video tag.
-                    </video>
-                </div>
-                <div className="flex items-center justify-between px-5 py-3 border-t border-white/10 text-xs text-slate-400">
-                    <span>Pre-generated example — instant, no AI cost.</span>
-                    <button
-                        onClick={onGenerateInstead}
-                        className="text-slate-300 hover:text-white transition-colors"
-                    >
-                        Generate a fresh version →
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-}

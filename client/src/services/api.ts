@@ -37,6 +37,9 @@ export interface Storyboard {
 export interface CreateStoryboardRequest {
   prompt: string;
   autoGenerate?: boolean;
+  /** Hidden hint when submitting a "suggestion" prompt — server uses it
+   *  to clone a pre-rendered demo instead of calling the LLM. */
+  demoStoryboardId?: string;
 }
 
 export interface UpdateSceneRequest {

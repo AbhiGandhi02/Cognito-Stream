@@ -695,8 +695,10 @@ export async function generateManimSceneCode(
       let code = await callLLMText({
         systemPrompt: MANIM_CODE_SYSTEM_PROMPT,
         userPrompt: buildCodeGenPrompt(params),
-        // Bump temperature on retries to break out of stuck output patterns.
-        temperature: attempt === 1 ? 0.4 : 0.6,
+        // Lower temperature reduces API hallucinations (invented kwargs /
+        // method names like get_tangent_line) without costing tokens. Still
+        // bump on retries to escape stuck patterns.
+        temperature: attempt === 1 ? 0.25 : 0.45,
         // 4096 was getting truncated mid-imports for verbose models — give
         // the scene class room to actually finish.
         maxTokens: 8192,
@@ -858,6 +860,19 @@ function validateManimCode(code: string): string[] {
   if (/\bCENTER\b(?!\s*=)/.test(code)) {
     issues.push("'CENTER' is not exported by Manim — use 'ORIGIN'");
   }
+  if (/\bSuccessionGroup\b/.test(code)) {
+    issues.push("'SuccessionGroup' does not exist in Manim CE — use 'Succession' instead");
+  }
+  // get_tangent_line is brittle and breaks with various kwargs in CE 0.18.0.
+  // Tell the model to build the tangent manually using axes.c2p + slope.
+  if (/\.get_tangent_line\s*\(/.test(code)) {
+    issues.push("axes.get_tangent_line(...) is unreliable in CE 0.18.0 — build the tangent line manually: take two points along the slope at x_val using axes.c2p() and connect them with Line()");
+  }
+  // Abstract ArrowTip base class — instantiating it directly raises
+  // NotImplementedError. Force a concrete subclass.
+  if (/\btip_shape\s*=\s*ArrowTip\b/.test(code)) {
+    issues.push("'tip_shape=ArrowTip' instantiates the abstract base class — use 'tip_shape=ArrowTriangleFilledTip' (or another concrete tip)");
+  }
   // Hallucinated dash kwargs on shape constructors. The right way to dash a
   // VMobject is to wrap it in DashedVMobject(circle, num_dashes=N). We strip
   // these in normalize, but the validator stays as a safety net.
@@ -930,6 +945,8 @@ function patchInventedMethods(code: string): string {
   code = code.replace(/\.to_center\s*\(\s*\)/g, '.move_to(ORIGIN)');
   // `.center_on_screen()` → `.move_to(ORIGIN)`
   code = code.replace(/\.center_on_screen\s*\(\s*\)/g, '.move_to(ORIGIN)');
+  // `SuccessionGroup` doesn't exist in Manim CE — the real class is `Succession`.
+  code = code.replace(/\bSuccessionGroup\b/g, 'Succession');
   return code;
 }
 

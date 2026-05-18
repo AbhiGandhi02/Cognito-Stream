@@ -26,6 +26,12 @@ model Storyboard {
   // Gemini outage during initial scene-planning). Per-scene errors live
   // on the Scene rows.
   errorMessage    String?  @db.Text
+  // When set, this storyboard was cloned from a pre-rendered "suggestion"
+  // template. The clone owns its own row + scenes so it appears in the
+  // user's history, but the LLM/renderer is short-circuited — code and
+  // final video are copied lazily from the source as the user clicks
+  // Generate Code / Render Final Video. Invisible to the user.
+  demoSourceId    String?
 
   scenes          Scene[]
   user            User?    @relation(fields: [userId], references: [id], onDelete: Cascade)

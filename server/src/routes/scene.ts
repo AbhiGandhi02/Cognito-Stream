@@ -195,18 +195,39 @@ router.post(
       )
       .join('\n');
 
-    console.log(`🎨 Generating Manim code for scene ${scene.sceneNumber}: "${scene.visualDescription.slice(0, 50)}"`);
-
-    const code = await generateManimSceneCode({
-      sceneTitle: `Scene ${scene.sceneNumber}`,
-      narration: scene.narration,
-      visualDescription: scene.visualDescription,
-      duration: scene.estimatedDuration,
-      sceneNumber: scene.sceneNumber,
-      totalScenes: scene.storyboard.scenes.length,
-      overallTopic: scene.storyboard.prompt,
-      previousSceneContext: previousSceneContext || undefined,
-    });
+    // ---------------------------------------------------------------
+    // Demo clone: if this scene's storyboard was cloned from a demo,
+    // serve the source scene's saved manimCode instead of calling the
+    // LLM. Same response shape — invisible to the user.
+    // ---------------------------------------------------------------
+    const demoSourceId: string | null = scene.storyboard.demoSourceId ?? null;
+    let code: string;
+    if (demoSourceId) {
+      const sourceScene = await prisma.scene.findFirst({
+        where: { storyboardId: demoSourceId, sceneNumber: scene.sceneNumber },
+        select: { manimCode: true },
+      });
+      if (!sourceScene || !sourceScene.manimCode) {
+        return res.status(500).json({
+          error: 'Demo Source Missing',
+          message: `Demo source scene ${scene.sceneNumber} has no cached code`,
+        });
+      }
+      console.log(`✨ [Demo] Serving cached code for scene ${scene.sceneNumber}`);
+      code = sourceScene.manimCode;
+    } else {
+      console.log(`🎨 Generating Manim code for scene ${scene.sceneNumber}: "${scene.visualDescription.slice(0, 50)}"`);
+      code = await generateManimSceneCode({
+        sceneTitle: `Scene ${scene.sceneNumber}`,
+        narration: scene.narration,
+        visualDescription: scene.visualDescription,
+        duration: scene.estimatedDuration,
+        sceneNumber: scene.sceneNumber,
+        totalScenes: scene.storyboard.scenes.length,
+        overallTopic: scene.storyboard.prompt,
+        previousSceneContext: previousSceneContext || undefined,
+      });
+    }
 
     const updatedScene = await prisma.scene.update({
       where: { id },

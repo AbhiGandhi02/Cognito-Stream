@@ -6,6 +6,7 @@ import { triggerRenderer, assembleVideo } from '../services/renderer';
 import { processStoryboardScenes } from '../services/orchestrator';
 import { validateRequest } from '../middleware/validation';
 import { asyncHandler } from '../middleware/asyncHandler';
+import { findDemoSource } from '../lib/demo';
 import { z } from 'zod';
 
 const router = Router();
@@ -120,6 +121,11 @@ const createStoryboardSchema = z.object({
   // userId is no longer accepted from the request body — it's pulled from
   // the verified Supabase JWT via requireAuth middleware (req.user.id).
   autoGenerate: z.boolean().optional().default(true),
+  // Hidden hint from the dashboard suggestion UI: when set AND matches a
+  // registered demo source, the server clones that pre-rendered storyboard
+  // into the user's account instead of calling the LLM. Server-side
+  // exact-prompt matching is a second detection path.
+  demoStoryboardId: z.string().optional(),
 });
 
 const updateStoryboardSchema = z.object({
@@ -356,8 +362,63 @@ router.post(
   '/',
   validateRequest(createStoryboardSchema),
   asyncHandler(async (req: Request, res: Response) => {
-    const { prompt } = req.body;
+    const { prompt, demoStoryboardId } = req.body;
     const userId = req.user!.id; // requireAuth middleware guarantees this
+
+    // ---------------------------------------------------------------
+    // Demo / suggestion clone path.
+    // If the prompt matches a registered demo (or the client passes a
+    // valid demoStoryboardId), skip the LLM entirely and clone the
+    // source storyboard's scenes (narration + visualDescription only,
+    // status='pending') into a new row owned by this user. Manim code
+    // and final video URL are revealed lazily when the user clicks
+    // Generate Code / Render Final Video. From the user's perspective
+    // this is indistinguishable from a real generation.
+    // ---------------------------------------------------------------
+    const demoSourceId = findDemoSource(prompt, demoStoryboardId);
+    if (demoSourceId) {
+      console.log(`✨ Demo clone — source=${demoSourceId}, user=${userId}`);
+      const source = await prisma.storyboard.findUnique({
+        where: { id: demoSourceId },
+        include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
+      });
+      if (!source) {
+        return res.status(500).json({
+          error: 'Demo Source Missing',
+          message: `Demo storyboard ${demoSourceId} not found`,
+        });
+      }
+      const cloned = await prisma.storyboard.create({
+        data: {
+          userId,
+          title: source.title,
+          description: source.description,
+          prompt,
+          status: 'draft',
+          totalDuration: source.totalDuration,
+          demoSourceId: source.id,
+          scenes: {
+            create: source.scenes.map((sc) => ({
+              sceneNumber: sc.sceneNumber,
+              narration: sc.narration,
+              visualDescription: sc.visualDescription,
+              manimCode: '', // hidden until the user clicks "Generate Code"
+              estimatedDuration: sc.estimatedDuration,
+              status: 'pending',
+            })),
+          },
+        },
+        include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
+      });
+      const responseData = {
+        ...cloned,
+        scenes: cloned.scenes.map((scene) => ({
+          ...scene,
+          manimCode: safeParseManimCode(scene.manimCode || '{}'),
+        })),
+      };
+      return res.status(201).json(responseData);
+    }
 
     console.log(`📝 Generating storyboard for prompt: "${prompt.substring(0, 50)}..." (user ${userId})`);
 
@@ -423,7 +484,7 @@ router.post(
       console.log('📝 Storyboard created in draft mode (no auto-render).');
     }
 
-    res.status(201).json(responseData);
+    return res.status(201).json(responseData);
   })
 );
 
@@ -458,6 +519,58 @@ router.post(
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Storyboard has no scenes to render',
+      });
+    }
+
+    // ---------------------------------------------------------------
+    // Demo clone: copy the source storyboard's finalVideoUrl + each
+    // scene's videoUrl / audioUrl / thumbnailUrl / actualDuration in
+    // place. No renderer call. Same response shape — invisible.
+    // ---------------------------------------------------------------
+    const demoSourceId: string | null = storyboard.demoSourceId ?? null;
+    if (demoSourceId) {
+      const source = await prisma.storyboard.findUnique({
+        where: { id: demoSourceId },
+        include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
+      });
+      if (!source) {
+        return res.status(500).json({
+          error: 'Demo Source Missing',
+          message: 'Demo source storyboard not found',
+        });
+      }
+      console.log(`✨ [Demo] Copying source video URLs for storyboard ${id}`);
+      // Mirror per-scene URLs.
+      await Promise.all(
+        storyboard.scenes.map(async (s) => {
+          const src = source.scenes.find((x) => x.sceneNumber === s.sceneNumber);
+          if (!src) return;
+          await prisma.scene.update({
+            where: { id: s.id },
+            data: {
+              videoUrl: src.videoUrl,
+              audioUrl: src.audioUrl,
+              thumbnailUrl: src.thumbnailUrl,
+              actualDuration: src.actualDuration,
+              status: 'completed',
+            },
+          });
+        })
+      );
+      const completed = await prisma.storyboard.update({
+        where: { id },
+        data: {
+          status: 'completed',
+          finalVideoUrl: source.finalVideoUrl,
+        },
+        include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
+      });
+      return res.json({
+        ...completed,
+        scenes: completed.scenes.map((s) => ({
+          ...s,
+          manimCode: safeParseManimCode(s.manimCode || '{}'),
+        })),
       });
     }
 
