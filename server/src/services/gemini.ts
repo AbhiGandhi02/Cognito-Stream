@@ -947,6 +947,14 @@ function patchInventedMethods(code: string): string {
   code = code.replace(/\.center_on_screen\s*\(\s*\)/g, '.move_to(ORIGIN)');
   // `SuccessionGroup` doesn't exist in Manim CE — the real class is `Succession`.
   code = code.replace(/\bSuccessionGroup\b/g, 'Succession');
+  // Hallucinated submodule: there's no `manim.mobject.svg.special_mobjects`.
+  // `Checkmark` isn't a real Mobject — drop the import and rewrite the call.
+  code = code.replace(
+    /^.*from\s+manim\.mobject\.svg\.special_mobjects\s+import[^\n]*\n?/gm,
+    ''
+  );
+  code = code.replace(/\bCheckmark\s*\(\s*\)/g, 'Text("✓")');
+  code = code.replace(/\bCheckmark\s*\(/g, 'Text("✓", ');
   return code;
 }
 

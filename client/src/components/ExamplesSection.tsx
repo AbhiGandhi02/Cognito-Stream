@@ -18,18 +18,31 @@ const CATEGORY_BADGE: Record<string, string> = {
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
-/** Resolves an example to a concrete video URL. Returns null while loading or
- *  if the storyboard hasn't finished rendering (entry is then hidden). */
-async function resolveExampleUrl(video: ExampleVideo): Promise<string | null> {
-    if (video.videoUrl) return video.videoUrl;
-    if (!video.storyboardId) return null;
+interface ResolvedExample {
+    videoUrl: string | null;
+    posterUrl: string | null;
+}
+
+/** Resolves an example to a concrete video URL plus a poster (first scene's
+ *  thumbnail) when available. Returns nulls if the storyboard hasn't finished
+ *  rendering. */
+async function resolveExample(video: ExampleVideo): Promise<ResolvedExample> {
+    if (video.videoUrl) {
+        return { videoUrl: video.videoUrl, posterUrl: video.posterUrl ?? null };
+    }
+    if (!video.storyboardId) return { videoUrl: null, posterUrl: null };
     try {
         const res = await fetch(`${API_BASE}/api/public/storyboard/${video.storyboardId}`);
-        if (!res.ok) return null;
+        if (!res.ok) return { videoUrl: null, posterUrl: null };
         const data = await res.json();
-        return data.finalVideoUrl ?? null;
+        // Poster = first scene's thumbnailUrl (small jpg, paints instantly).
+        const firstScene = Array.isArray(data.scenes) ? data.scenes[0] : null;
+        return {
+            videoUrl: data.finalVideoUrl ?? null,
+            posterUrl: firstScene?.thumbnailUrl ?? null,
+        };
     } catch {
-        return null;
+        return { videoUrl: null, posterUrl: null };
     }
 }
 
@@ -82,9 +95,22 @@ function ExampleCard({ video, onPlay }: { video: ExampleVideo; onPlay: (v: Examp
                 </div>
 
                 {/* Actual video — frame 0 acts as the poster; hover loops it */}
+                {/* Poster image — small jpg (first-scene thumbnail) that
+                    paints instantly while the video file is still fetching
+                    metadata. Sits BEHIND the <video> so the hover-to-play
+                    swap is invisible. */}
+                {video.posterUrl && (
+                    <img
+                        src={video.posterUrl}
+                        alt=""
+                        aria-hidden="true"
+                        className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.04]"
+                    />
+                )}
                 <video
                     ref={videoRef}
                     src={video.videoUrl}
+                    poster={video.posterUrl}
                     muted
                     playsInline
                     loop
@@ -215,30 +241,40 @@ function VideoModal({ video, onClose }: { video: ExampleVideo; onClose: () => vo
 
 export function ExamplesSection() {
     const [openVideo, setOpenVideo] = useState<ExampleVideo | null>(null);
-    // Map of example.id → resolved video URL. Examples without a resolved URL
-    // are hidden from the grid (e.g. storyboard hasn't finished rendering yet).
+    // Map of example.id → resolved video URL + poster URL. Cards render with
+    // the gradient + glyph fallback until these populate.
     const [resolvedUrls, setResolvedUrls] = useState<Record<string, string>>({});
+    const [resolvedPosters, setResolvedPosters] = useState<Record<string, string>>({});
 
     useEffect(() => {
         let cancelled = false;
         (async () => {
             const entries = await Promise.all(
-                EXAMPLE_VIDEOS.map(async (v) => [v.id, await resolveExampleUrl(v)] as const)
+                EXAMPLE_VIDEOS.map(async (v) => [v.id, await resolveExample(v)] as const)
             );
             if (cancelled) return;
-            const map: Record<string, string> = {};
-            for (const [id, url] of entries) {
-                if (url) map[id] = url;
+            const urlMap: Record<string, string> = {};
+            const posterMap: Record<string, string> = {};
+            for (const [id, resolved] of entries) {
+                if (resolved.videoUrl) urlMap[id] = resolved.videoUrl;
+                if (resolved.posterUrl) posterMap[id] = resolved.posterUrl;
             }
-            setResolvedUrls(map);
+            setResolvedUrls(urlMap);
+            setResolvedPosters(posterMap);
         })();
         return () => { cancelled = true; };
     }, []);
 
-    // Only render examples whose video URL has been resolved.
-    const visibleExamples = EXAMPLE_VIDEOS
-        .filter((v) => resolvedUrls[v.id])
-        .map((v) => ({ ...v, videoUrl: resolvedUrls[v.id] }));
+    // Render every example up-front. Cards display the gradient + glyph
+    // fallback (along with title, description, duration, category) until
+    // their video URL resolves — then the first frame paints in place of
+    // the gradient. Means the grid is fully populated within ~16ms of mount
+    // even though the actual URLs trickle in over the next few seconds.
+    const visibleExamples = EXAMPLE_VIDEOS.map((v) => ({
+        ...v,
+        videoUrl: resolvedUrls[v.id] ?? v.videoUrl,
+        posterUrl: resolvedPosters[v.id] ?? v.posterUrl,
+    }));
 
     return (
         <section id="examples" className="relative px-6 py-14 max-w-6xl mx-auto">
