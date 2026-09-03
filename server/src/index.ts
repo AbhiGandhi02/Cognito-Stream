@@ -44,9 +44,36 @@ app.use(express.json());
 // ROUTES
 // ==========================================
 
-// Health check
+// Health check — cheap liveness probe. Used as Render's healthCheckPath, so it
+// deliberately touches nothing external: a DB hiccup must not get us restarted.
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// DB health check — issues a real query so the Postgres connection is exercised.
+// This is the one to hit from an external cron: it keeps the Render instance
+// awake AND registers activity on Supabase, which pauses idle free projects.
+app.get('/health/db', async (_req, res) => {
+  const startedAt = Date.now();
+  try {
+    const { prisma } = await import('./lib/prisma');
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({
+      status: 'ok',
+      db: 'reachable',
+      latencyMs: Date.now() - startedAt,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error('[health/db] query failed:', err?.message || err);
+    res.status(503).json({
+      status: 'error',
+      db: 'unreachable',
+      error: String(err?.message || err),
+      latencyMs: Date.now() - startedAt,
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // LLM health check — probes Gemini + Groq independently and reports cooldown state
@@ -123,6 +150,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Cognito Stream API Server running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
+  console.log(`🗄️  DB health check: http://localhost:${PORT}/health/db`);
   console.log(`📁 Audio files: ${audioPath}`);
 });
 
