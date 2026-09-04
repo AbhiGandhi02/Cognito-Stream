@@ -46,10 +46,14 @@ DEFAULT_RENDER_QUALITY = os.getenv('DEFAULT_RENDER_QUALITY', 'low')
 # ==========================================
 # CLOUD STORAGE (Supabase)
 # ==========================================
-# When SUPABASE_SERVICE_ROLE_KEY is set, finished mp4/mp3 files are uploaded
-# to a Supabase Storage bucket and the renderer returns the public URL. When
-# unset (local dev), files stay on /app/output and /app/audio and the
-# renderer returns relative `/videos/...` and `/audio/...` paths as before.
+# When SUPABASE_SERVICE_ROLE_KEY is set, two things are uploaded to the
+# Supabase Storage bucket and the renderer returns their public URLs: the
+# final stitched mp4 (narration already muxed in) and the small per-scene
+# first-frame thumbnails the dashboard uses as posters. Nothing else — audio
+# and per-scene videos are intermediates that stay on local disk, since the
+# app has no way to read them from the bucket. When unset (local dev),
+# everything stays on /app/output and /app/audio and the renderer returns
+# relative `/videos/...` and `/audio/...` paths as before.
 SUPABASE_URL = os.getenv('SUPABASE_URL', '').rstrip('/')
 SUPABASE_SERVICE_ROLE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY', '')
 SUPABASE_BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET', 'cognito-stream')
@@ -432,34 +436,66 @@ def render_scene_with_manim(scene_file, scene_id, quality='medium'):
         raise
 
 def stitch_audio_video(video_path, audio_path, output_path):
-    """Combine video and audio. The output duration is driven by the AUDIO
-    (narration) length: the last video frame is held until the audio ends,
-    so narration always plays in full. Without this, Manim scenes whose
-    self.wait() is shorter than the TTS narration cut audio mid-sentence."""
+    """Combine video and audio, keeping BOTH streams whole.
 
+    Output length is max(video, audio):
+
+      * Narration longer than the animation -> the last video frame is held
+        (cloned) until the audio finishes, so narration always plays in full.
+      * Animation longer than the narration -> the audio is padded with
+        silence, so the animation always plays in full.
+
+    The second case used to be a hard cut at the audio length, which
+    truncated the animation mid-motion with no error and no log line. Both
+    directions are now symmetric, and the size of the gap is minimised
+    upstream by generating the narration first and building the animation to
+    fit its measured duration (see server/src/lib/narrationTiming.ts).
+    """
+
+    video_duration = float(get_video_duration(video_path))
     audio_duration = float(get_video_duration(audio_path))
+
+    # Fall back conservatively if probing failed for either stream — better to
+    # over-run and pad than to silently cut content.
     if audio_duration <= 0:
-        # Fall back to old behavior if probing failed for some reason.
+        logger.warning("Could not probe audio duration; assuming 60s")
         audio_duration = 60.0
+    if video_duration <= 0:
+        logger.warning("Could not probe video duration; deferring to audio length")
+        video_duration = audio_duration
 
-    logger.info(f"Stitching audio ({audio_duration:.2f}s) to video...")
+    target = max(video_duration, audio_duration)
+    gap = abs(video_duration - audio_duration)
+    longer = "video" if video_duration > audio_duration else "audio"
+    logger.info(
+        f"Stitching: video={video_duration:.2f}s audio={audio_duration:.2f}s "
+        f"-> output={target:.2f}s ({longer} longer by {gap:.2f}s)"
+    )
+    # A large mismatch means the timing budget did not land. Not fatal — the
+    # padding below keeps the scene watchable — but worth surfacing, since a
+    # persistent skew here points at the code-gen prompt rather than FFmpeg.
+    if gap > max(3.0, 0.35 * target):
+        logger.warning(
+            f"Large A/V mismatch ({gap:.2f}s over a {target:.2f}s scene) — "
+            f"{longer} overruns; check the scene's timing budget."
+        )
 
-    # Strategy: pad video by cloning the last frame to match audio length, then
-    # cap output at the audio duration with `-t`. We do NOT rely on `-shortest`
-    # because its interaction with the `tpad` filter has produced incorrect
-    # output durations in practice.
+    # Pad BOTH streams past the target, then cut both at it. We do NOT rely on
+    # `-shortest`, whose interaction with `tpad` has produced incorrect output
+    # durations in practice; an explicit `-t` is deterministic.
     cmd = [
         'ffmpeg',
         '-i', str(video_path),
         '-i', str(audio_path),
-        '-vf', f'tpad=stop_mode=clone:stop_duration={audio_duration + 0.5}',
+        '-vf', f'tpad=stop_mode=clone:stop_duration={target + 0.5}',
+        '-af', f'apad=pad_dur={target + 0.5}',
         '-c:v', 'libx264',
         '-preset', 'fast',
         '-crf', '23',
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
         '-b:a', '192k',
-        '-t', f'{audio_duration:.3f}',
+        '-t', f'{target:.3f}',
         '-y',
         str(output_path),
     ]
@@ -468,7 +504,7 @@ def stitch_audio_video(video_path, audio_path, output_path):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
             raise Exception(f"FFmpeg error: {result.stderr}")
-        logger.info(f"✓ Audio stitched successfully (output={audio_duration:.2f}s)")
+        logger.info(f"✓ Audio stitched successfully (output={target:.2f}s)")
         return output_path
     except Exception as e:
         logger.error(f"Audio stitching failed: {e}")
@@ -681,6 +717,14 @@ def health_check():
         'service': 'cognito-renderer',
         'version': '1.0.0',
         'uptime': uptime,
+        # Whether SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are both present.
+        # When false, finished videos are NOT uploaded — the renderer returns
+        # relative `/videos/...` paths that only resolve on its own disk, so
+        # the DB ends up storing a link that 404s from anywhere else. Exposed
+        # here (no secrets, just the boolean + bucket name) so a deploy can be
+        # verified without shell access to the container.
+        'cloud_storage': USE_CLOUD_STORAGE,
+        'storage_bucket': SUPABASE_BUCKET if USE_CLOUD_STORAGE else None,
         'stats': {
             'total_renders': stats['total_renders'],
             'successful_renders': stats['successful_renders'],
@@ -1197,7 +1241,10 @@ def assemble_video():
                 content_type='video/mp4',
             )
             video_url = public_url or f'/videos/{storyboard_id}_final.mp4'
-            logger.info(f"✓ Final video uploaded to: {video_storage_path}")
+            if public_url:
+                logger.info(f"✓ Final video uploaded to bucket: {video_storage_path}")
+            else:
+                logger.info("✓ Final video stored locally (no cloud storage configured)")
 
             # Concatenate per-scene narration into a single final voice track
             # and upload as audio/<storyboardId>_final.mp3. Skip silently if
@@ -1210,24 +1257,49 @@ def assemble_video():
                     persistent_audio = AUDIO_DIR / f'{storyboard_id}_final.mp3'
                     shutil.copy(str(final_audio_local), str(persistent_audio))
 
-                    audio_storage_path = build_storage_path('audio', storyboard_id, title, '.mp3')
-                    audio_public = upload_to_storage(
-                        local_path=str(persistent_audio),
-                        storage_path=audio_storage_path,
-                        content_type='audio/mpeg',
-                    )
-                    audio_url = audio_public or f'/audio/{storyboard_id}_final.mp3'
-                    logger.info(f"✓ Final voice track uploaded to: {audio_storage_path}")
+                    # Deliberately NOT uploaded to Supabase. This track is
+                    # the same narration already muxed into the final mp4, and
+                    # nothing reads it: the assemble response's audio field is
+                    # not persisted (see server/src/services/renderer.ts
+                    # AssembleResult) and there is no finalAudioUrl column. It
+                    # used to be pushed to `audio/<slug>.mp3`, which just grew
+                    # write-only files. The bucket holds final stitched videos
+                    # only; the local copy stays for renderer-side debugging.
+                    audio_url = f'/audio/{storyboard_id}_final.mp3'
+                    logger.info(f"✓ Final voice track kept locally: {persistent_audio.name}")
                 except Exception as audio_err:
                     logger.error(f"Final voice concat/upload failed: {audio_err}")
 
-            # Final video is shipped — delete per-scene intermediates from
-            # local disk so the bucket and the renderer disk only retain finals.
-            for f in scene_local_files:
+            # Storage policy:
+            #   per-scene mp4s -> stay on local disk
+            #   final mp4      -> bucket, then the local copy is dropped
+            #
+            # The per-scene files used to be deleted here, which made the final
+            # video a one-shot artifact: once it shipped, its inputs were gone,
+            # so re-assembling after a scene was retried silently produced a
+            # video containing only the scenes that happened to still exist.
+            # They are the durable inputs to every future rebuild, so they stay.
+            #
+            # The final mp4 is the opposite: once it is in the bucket, the local
+            # copy is a duplicate. Deleted only when the upload actually
+            # succeeded — with no cloud storage configured (local dev), that
+            # file is the only copy of the video and must be kept.
+            if public_url:
                 try:
-                    Path(f).unlink(missing_ok=True)
+                    persistent_path.unlink(missing_ok=True)
+                    logger.info(
+                        f"🗑️  Local final removed (now served from bucket): {persistent_path.name}"
+                    )
                 except Exception as cleanup_err:
-                    logger.warning(f"Failed to delete intermediate {f}: {cleanup_err}")
+                    logger.warning(f"Could not remove local final: {cleanup_err}")
+            else:
+                logger.info(
+                    f"✓ Final kept locally (cloud storage not configured): {persistent_path.name}"
+                )
+
+            logger.info(
+                f"📦 Retained {len(scene_local_files)} per-scene file(s) for future rebuilds"
+            )
         finally:
             # Always clean up the working dir (downloads + stitched intermediates).
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -1313,6 +1385,94 @@ def text_to_speech():
             'success': False,
             'error': str(e)
         }), 500
+
+def _storage_path_from_url(url):
+    """Map a Supabase public URL back to the object path inside the bucket.
+
+    Public URLs look like:
+      https://<proj>.supabase.co/storage/v1/object/public/<bucket>/videos/foo.mp4
+
+    Returns None for a relative/local URL or a URL from another bucket.
+    """
+    if not url:
+        return None
+    marker = f'/storage/v1/object/public/{SUPABASE_BUCKET}/'
+    idx = str(url).find(marker)
+    if idx == -1:
+        return None
+    return str(url)[idx + len(marker):].split('?')[0]
+
+
+def _local_path_from_url(url):
+    """Map a relative /videos/... or /audio/... URL to its file on disk."""
+    if not url:
+        return None
+    url = str(url).split('?')[0]
+    if url.startswith('/videos/'):
+        return OUTPUT_DIR / url[len('/videos/'):]
+    if url.startswith('/audio/'):
+        return AUDIO_DIR / url[len('/audio/'):]
+    return None
+
+
+@app.route('/delete-final', methods=['POST'])
+def delete_final():
+    """Delete a storyboard's previously assembled final video / audio.
+
+    Called before re-assembling after a scene was retried. Upload already
+    overwrites an object at the SAME path, but the path is derived from the
+    storyboard title (videos/<slug>-<short-id>.mp4) — so once a title changes,
+    a rebuild lands on a new path and the old file is orphaned in the bucket
+    forever. Deleting by the URL actually recorded in the database removes the
+    object that exists rather than the one we would compute today.
+
+    Missing files are not an error: this runs on a best-effort cleanup path and
+    must never block the rebuild that follows it.
+    """
+    try:
+        data = request.json or {}
+        urls = [u for u in (data.get('videoUrl'), data.get('audioUrl')) if u]
+
+        deleted, missing, failed = [], [], []
+
+        for url in urls:
+            storage_path = _storage_path_from_url(url)
+            if storage_path and USE_CLOUD_STORAGE:
+                try:
+                    _get_supabase().storage.from_(SUPABASE_BUCKET).remove([storage_path])
+                    deleted.append(storage_path)
+                    logger.info(f"🗑️  Deleted from bucket: {storage_path}")
+                except Exception as e:
+                    failed.append({'path': storage_path, 'error': str(e)[:200]})
+                    logger.warning(f"⚠️  Could not delete {storage_path}: {e}")
+                continue
+
+            local_path = _local_path_from_url(url)
+            if local_path is not None:
+                try:
+                    if local_path.exists():
+                        local_path.unlink()
+                        deleted.append(str(local_path))
+                        logger.info(f"🗑️  Deleted local file: {local_path}")
+                    else:
+                        missing.append(str(local_path))
+                except Exception as e:
+                    failed.append({'path': str(local_path), 'error': str(e)[:200]})
+                continue
+
+            missing.append(str(url))
+
+        return jsonify({
+            'success': True,
+            'deleted': deleted,
+            'missing': missing,
+            'failed': failed,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"delete-final failed: {e}")
+        return jsonify({'success': False, 'error': str(e)[:300]}), 500
+
 
 @app.route('/stats', methods=['GET'])
 def get_stats():

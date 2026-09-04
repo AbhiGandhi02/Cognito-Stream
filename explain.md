@@ -62,12 +62,15 @@ The client signs the user in via **Supabase Auth**. Supabase issues a **JWT**. T
 
 ### Step 1 — Prompt → Storyboard (scene planning)
 `POST /api/storyboard` with `{ prompt }`.
-- The server calls `generateStoryboard()` (`server/src/services/gemini.ts`), which asks the LLM to return a **JSON array of scenes**, each with `scene_title`, `narration`, and `visual_description`.
-- The response is parsed (handles raw JSON *or* markdown-fenced JSON), validated, and **persisted**: one `Storyboard` row + N `Scene` rows (status `pending`), inside a Prisma transaction.
-- If `autoGenerate !== false`, the server immediately kicks off the full pipeline **in the background** (fire-and-forget) and returns the storyboard right away. The client then **polls** `GET /api/storyboard/:id` until status flips to `completed`/`failed`.
+- The server calls `generateStoryboard()` (`server/src/services/gemini.ts`), which asks the LLM for a **JSON array of scenes**, each with `scene_title`, `narration`, and `visual_description`. The shape is enforced by a **response schema** that Gemini applies server-side, so the reply is guaranteed-parseable rather than prose we coax into shape.
+- Each scene's `estimatedDuration` is derived from **how long its narration takes to speak** (~150 wpm), not a fixed constant.
+- Validated and **persisted**: one `Storyboard` row + N `Scene` rows (status `pending`), inside a Prisma transaction.
+- The dashboard sends `autoGenerate: false` and uses a two-step **review → render** flow, so the user can edit narration before paying for renders. When the flag is omitted, the server kicks off the pipeline **in the background** (fire-and-forget) and the client **polls** `GET /api/storyboard/:id` until status flips to `completed`/`failed`.
 
 ### Step 2 — Scene → Manim code (per scene)
-The orchestrator (`server/src/services/orchestrator.ts`) processes scenes. For each scene, `generateManimSceneCode()` asks the LLM to write a **complete Manim Python class** named `GeneratedScene`, guided by a large **system prompt** (`server/src/services/prompts.ts`) full of rules about what Manim APIs exist.
+The orchestrator (`server/src/services/orchestrator.ts`) walks scenes **in order**, calling `generateManimSceneCode()` to write a **complete Manim Python class** named `GeneratedScene`, guided by a large **system prompt** (`server/src/services/prompts.ts`) full of rules about what Manim APIs exist.
+
+Each brief carries a **timing budget** taken from the measured narration audio (see Step 4 — TTS runs first), plus a summary of what the earlier scenes actually drew. That summary is extracted from their *generated Python* by `services/sceneContext.ts` — example arrays, colours, `MathTex` notation, on-screen labels — because those choices are made by the code generator and exist nowhere in the plan.
 
 ### Step 3 — Render with a self-correction loop
 This is the cleverest part. The server sends the code to the renderer's `POST /render-code` endpoint:
@@ -79,14 +82,16 @@ This is the cleverest part. The server sends the code to the renderer's `POST /r
 
 Every correction attempt is counted and stored on the scene (`correctionAttempts`).
 
-### Step 4 — Narration (TTS)
-Once the scene renders, the server calls the renderer's `POST /tts` endpoint. The renderer uses **Piper** (a local, offline neural TTS) to synthesize narration → WAV → MP3.
+### Step 4 — Narration (TTS) — *actually runs first*
+Before any code is written, the server calls the renderer's `POST /tts`. The renderer uses **Piper** (a local, offline neural TTS) to synthesize narration → WAV → MP3, and returns its **measured duration**.
+
+That measurement is the timing budget the animation is built to fit. Ordering it first is deliberate: TTS takes ~2s against ~60s for a render, so measuring up front is nearly free, and it is the only honest duration target. Every scene used to be told "you have ~5 seconds" regardless of its script, so a 25-second voiceover got a 7-second animation followed by 18 seconds of frozen frame.
 
 > **Note on naming:** the service file is `elevenlabs.ts` and the env example mentions ElevenLabs, but the **actual TTS in production is Piper**, run inside the renderer (`console.log('TTS provider: Piper')` in `server/src/index.ts`). This is a good thing to mention as an honest "we migrated TTS providers" detail.
 
 ### Step 5 — Assemble the final video
 After all scenes finish, the server calls `POST /assemble`. The renderer:
-1. **Stitches** each scene's audio onto its video (pads the video's last frame so narration always plays in full — `tpad` filter).
+1. **Stitches** each scene's audio onto its video, keeping **both** streams whole — output runs for `max(video, audio)`. Narration longer than the animation holds the last video frame (`tpad`); animation longer than the narration pads the audio with silence (`apad`). Neither is ever cut.
 2. **Concatenates** all per-scene videos into one MP4 (FFmpeg concat demuxer).
 3. Concatenates all per-scene narration into one MP3 voice track.
 4. **Uploads** the final MP4/MP3 to **Supabase Storage** and returns public URLs.
@@ -95,7 +100,13 @@ After all scenes finish, the server calls `POST /assemble`. The renderer:
 The server saves `finalVideoUrl` + `totalDuration` on the storyboard and marks it `completed`. The client's poller sees this and shows the finished video.
 
 ### Concurrency
-Scenes are processed by a **rolling worker pool** (default `SCENE_CONCURRENCY = 6`), not one-at-a-time. As soon as one scene finishes, the next pending one starts — so a 6-scene storyboard renders roughly as fast as a single scene. Completed scenes also feed a running summary back into later scenes' prompts so the LLM keeps **narrative continuity** (same notation, variables, examples across scenes).
+The pipeline runs in three phases, because the stages have opposite cost profiles:
+
+1. **Narrate** — parallel. Piper TTS for every scene; the measured audio length becomes the timing budget the animation is built to fit.
+2. **Write code** — **sequential**, in scene order. Each scene's brief carries what the earlier scenes actually drew (example arrays, colours, notation, extracted from their generated Python), so the video stays consistent. This must be ordered: a scene cannot reuse an example array that has not been chosen yet.
+3. **Render** — parallel, bounded by `SCENE_CONCURRENCY` (default 2). Manim is CPU-bound, so this is set to the renderer's CPU count; a higher value just timeshares one core.
+
+Rendering dominates the wall clock, so that is where concurrency is spent. Earlier versions ran all three stages in one parallel pool, which meant every scene started before any had finished — so every scene saw an empty continuity context and cross-scene consistency never actually happened.
 
 ---
 
@@ -106,14 +117,14 @@ Located in `server/src/services/gemini.ts` (the name is historical — it's now 
 ### Multi-provider fallback cascade
 Calls go through `callLLMText()`, which tries providers in order:
 
-**OpenRouter (DeepSeek V3.1) → Gemini → Groq (Llama 3.3 70B)**
+**Gemini free-tier key → Gemini paid key**
 
 - Each tier is **skipped if unconfigured or in cooldown**.
-- When a provider returns a quota/auth/5xx error, it's put in a **30-minute cooldown** (2 min for Groq, since its limits reset per minute) and traffic routes to the next tier.
+- When a key returns a quota/429 error it gets a **per-key cooldown** sized from Google's own `RetryInfo` hint (per-minute limits wait ~60s; a per-day limit waits until midnight Pacific), and traffic routes to the next key. Auth and 5xx errors deliberately do *not* fail over — a bad key is a config bug, and a 5xx hits both keys alike.
 - Errors are categorized (`quota` / `auth` / `server` / `other`) so we only fail over on the right ones.
 - `GET /api/health/llm` probes all three live and reports which work + cooldown state.
 
-**Why?** Free-tier LLM APIs are flaky and rate-limited. The cascade gives **resilience** — if Gemini is rate-limited mid-generation, the system silently keeps working on Groq.
+**Why?** The free tier is rate-limited but costs nothing. Serving from it first and spilling to the paid key only on a real quota error keeps the bill near zero without dropping requests.
 
 ### Provider rotation on retries
 For code generation, each retry attempt **forces a different provider**. Rationale: a model that keeps emitting the same broken pattern gets bypassed automatically. Correction attempts deliberately start at the *next* provider (don't ask the model that just failed to fix itself).
@@ -181,7 +192,7 @@ A: JWT-authenticated `POST /api/storyboard` → LLM generates a scene-by-scene s
 A: Layered defense — (1) a detailed system prompt enumerating valid Manim APIs, (2) deterministic auto-fix transforms for common hallucinations, (3) static validation that throws *before* rendering, (4) renderer-side AST + flake8 gates, and most importantly (5) a **feedback-correction loop**: the renderer returns structured errors, we hand them back to the LLM (rotating providers), and retry up to 3 times. We also lower temperature on the first attempt and raise it on retries to escape stuck patterns.
 
 **Q: What if the LLM provider is down or rate-limited?**
-A: A 3-tier cascade (OpenRouter → Gemini → Groq) with per-provider cooldowns. A quota/auth/5xx error trips a 30-min cooldown and routes to the next tier transparently. Code-gen retries also force provider rotation for diversity.
+A: Two Gemini keys — a free-tier primary and a paid secondary — with independent per-key cooldowns. A quota error cools the free key for exactly as long as Google's RetryInfo says and transparently routes to the paid key.
 
 **Q: How do you handle concurrency / why isn't it slow?**
 A: A rolling worker pool processes up to 6 scenes simultaneously, refilling as scenes complete — so a 6-scene video renders about as fast as one scene. Renders are the bottleneck (~30–60s each), so parallelizing them is the big win.

@@ -9,6 +9,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { ArrowLeft, RefreshCcw, Search, Film, Clock, Pencil, Trash2, Check, X } from 'lucide-react';
 import { api, type Storyboard } from '../services/api';
+import { resolveFinalVideoUrl } from '../data/demos';
 
 function statusPill(status: string): { label: string; className: string } {
     switch (status) {
@@ -227,9 +228,9 @@ export function HistoryPage() {
                                 >
                                     {/* Thumbnail */}
                                     <div className="shrink-0 w-20 h-12 rounded-md overflow-hidden border border-white/8 bg-navy-900 flex items-center justify-center">
-                                        {sb.finalVideoUrl ? (
+                                        {resolveFinalVideoUrl(sb) ? (
                                             <video
-                                                src={sb.finalVideoUrl}
+                                                src={resolveFinalVideoUrl(sb)!}
                                                 muted
                                                 playsInline
                                                 preload="metadata"

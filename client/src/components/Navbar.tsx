@@ -4,9 +4,9 @@
  * brand box.
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Menu, X, LogOut, Shield } from 'lucide-react';
+import { Menu, X, LogOut, Shield, MoreVertical } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useMe } from '../hooks/useMe';
 import { ThemeToggle } from './ThemeToggle';
@@ -14,6 +14,8 @@ import { ThemeToggle } from './ThemeToggle';
 export function Navbar() {
     const [scrolled, setScrolled] = useState(false);
     const [mobileOpen, setMobileOpen] = useState(false);
+    const [overflowOpen, setOverflowOpen] = useState(false);
+    const overflowRef = useRef<HTMLDivElement>(null);
     const navigate = useNavigate();
     const { session, signOut } = useAuth();
     const { isAdmin } = useMe();
@@ -23,6 +25,37 @@ export function Navbar() {
         window.addEventListener('scroll', handle);
         return () => window.removeEventListener('scroll', handle);
     }, []);
+
+    // The condensed (scrolled) bar has no room for Admin + Sign out, so they
+    // fold into a single overflow menu. Drop the menu when the bar expands
+    // again and those buttons return inline.
+    useEffect(() => {
+        if (!scrolled) setOverflowOpen(false);
+    }, [scrolled]);
+
+    useEffect(() => {
+        if (!overflowOpen) return;
+        const onPointerDown = (e: MouseEvent | TouchEvent) => {
+            if (!overflowRef.current?.contains(e.target as Node)) setOverflowOpen(false);
+        };
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setOverflowOpen(false);
+        };
+        document.addEventListener('mousedown', onPointerDown);
+        document.addEventListener('touchstart', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('mousedown', onPointerDown);
+            document.removeEventListener('touchstart', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [overflowOpen]);
+
+    const handleSignOut = async () => {
+        setOverflowOpen(false);
+        await signOut();
+        navigate('/');
+    };
 
     const navLinks = [
         { label: 'Home', href: '/' },
@@ -77,7 +110,7 @@ export function Navbar() {
                 <div className="hidden md:flex items-center gap-2">
                     {session ? (
                         <div className="flex items-center gap-2">
-                            {isAdmin && (
+                            {isAdmin && !scrolled && (
                                 <button
                                     onClick={() => navigate('/admin')}
                                     className="btn-secondary text-sm flex items-center gap-1.5"
@@ -87,24 +120,65 @@ export function Navbar() {
                                     Admin
                                 </button>
                             )}
-                            <ThemeToggle />
+                            {!scrolled && <ThemeToggle />}
                             <button
                                 onClick={() => navigate('/dashboard')}
                                 className="btn-primary text-sm"
                             >
                                 Dashboard
                             </button>
-                            <button
-                                onClick={async () => {
-                                    await signOut();
-                                    navigate('/');
-                                }}
-                                className="btn-secondary text-sm flex items-center gap-1.5"
-                                title="Sign out"
-                                aria-label="Sign out"
-                            >
-                                <LogOut className="w-3.5 h-3.5" />
-                            </button>
+                            {scrolled ? (
+                                <div className="relative" ref={overflowRef}>
+                                    <button
+                                        onClick={() => setOverflowOpen((open) => !open)}
+                                        className="btn-secondary text-sm flex items-center gap-1.5"
+                                        title="More"
+                                        aria-label="More options"
+                                        aria-haspopup="menu"
+                                        aria-expanded={overflowOpen}
+                                    >
+                                        <MoreVertical className="w-3.5 h-3.5" />
+                                    </button>
+                                    {overflowOpen && (
+                                        <div
+                                            role="menu"
+                                            className="absolute right-0 top-full mt-2 min-w-[10rem] p-1 rounded-xl border border-white/10 bg-navy-950/95 backdrop-blur-xl shadow-[0_10px_30px_-12px_rgba(0,0,0,0.55)]"
+                                        >
+                                            {isAdmin && (
+                                                <button
+                                                    role="menuitem"
+                                                    onClick={() => {
+                                                        setOverflowOpen(false);
+                                                        navigate('/admin');
+                                                    }}
+                                                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-300 hover:text-slate-100 hover:bg-white/5 transition-colors"
+                                                >
+                                                    <Shield className="w-3.5 h-3.5" />
+                                                    Admin
+                                                </button>
+                                            )}
+                                            <ThemeToggle variant="menuitem" />
+                                            <button
+                                                role="menuitem"
+                                                onClick={handleSignOut}
+                                                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-300 hover:text-slate-100 hover:bg-white/5 transition-colors"
+                                            >
+                                                <LogOut className="w-3.5 h-3.5" />
+                                                Sign out
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
+                                <button
+                                    onClick={handleSignOut}
+                                    className="btn-secondary text-sm flex items-center gap-1.5"
+                                    title="Sign out"
+                                    aria-label="Sign out"
+                                >
+                                    <LogOut className="w-3.5 h-3.5" />
+                                </button>
+                            )}
                         </div>
                     ) : (
                         <div className="flex items-center gap-2">
@@ -167,6 +241,30 @@ export function Navbar() {
                     >
                         Open dashboard
                     </button>
+                    {session && isAdmin && (
+                        <button
+                            onClick={() => {
+                                setMobileOpen(false);
+                                navigate('/admin');
+                            }}
+                            className="btn-secondary w-full text-sm mt-2 flex items-center justify-center gap-1.5"
+                        >
+                            <Shield className="w-3.5 h-3.5" />
+                            Admin
+                        </button>
+                    )}
+                    {session && (
+                        <button
+                            onClick={() => {
+                                setMobileOpen(false);
+                                handleSignOut();
+                            }}
+                            className="btn-secondary w-full text-sm mt-2 flex items-center justify-center gap-1.5"
+                        >
+                            <LogOut className="w-3.5 h-3.5" />
+                            Sign out
+                        </button>
+                    )}
                 </div>
             )}
         </nav>

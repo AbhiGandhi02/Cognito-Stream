@@ -31,3 +31,7 @@ storage/
 # AirPlay Receiver squatting on host 5000). Compose auto-loads this file, so
 # committing it would force one machine's workaround on every contributor.
 docker-compose.override.yml
+
+mine.md
+IMPROVEMENTS.md
+explain.md

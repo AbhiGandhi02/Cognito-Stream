@@ -60,4 +60,3 @@ See `server/.env.example` for Gemini, ElevenLabs, and storage credentials. Updat
 ### License
 
 MIT © Cognito Stream.
-

@@ -50,6 +50,9 @@ export interface Storyboard {
   prompt: string;
   status: StoryboardStatus;
   finalVideoUrl?: string;
+  /** Set when this row was cloned from a pre-rendered demo source. Lets the
+   *  client swap in the bundled copy of the video — see `data/demos.ts`. */
+  demoSourceId?: string;
   totalDuration?: number;
   scenes: Scene[];
   createdAt: Date;

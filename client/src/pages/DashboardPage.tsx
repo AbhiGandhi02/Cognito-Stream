@@ -38,28 +38,23 @@ import {
     X,
 } from 'lucide-react';
 
+import {
+    DEMO_SUGGESTIONS,
+    resolveFinalVideoUrl,
+    type DemoSuggestion,
+} from '../data/demos';
+
 // Curated prompt suggestions shown on the empty-state.
 //
-// When `storyboardId` is set, clicking the suggestion navigates to
-// /dashboard/<id>?replay=1 and the dashboard runs in replay mode — same UI
-// as a real generation (scene list → Generate Code → Render Final Video)
-// but every button is a no-op that just walks the user through the stages.
-// No LLM, no renderer, no DB writes. Falls back to prompt-fill when
-// storyboardId is undefined.
-interface PromptSuggestion {
-    prompt: string;
-    /** Pre-rendered storyboard ID. Click → /dashboard/<id>?replay=1. */
-    storyboardId?: string;
-}
+// Clicking one fills the prompt and records the source storyboard id as a
+// hidden hint for the create endpoint. The server clones that source into a
+// row owned by this user instead of calling the LLM, so the flow is the real
+// one — scene list → Generate Code → Render Final Video — and the result
+// lands in the user's History. The list itself lives in `data/demos.ts`,
+// which also maps each source id to a bundled copy of its final video.
+type PromptSuggestion = DemoSuggestion;
 
-const PROMPT_SUGGESTIONS: PromptSuggestion[] = [
-    { prompt: "Explain Newton's three laws of motion", storyboardId: 'cmp8uqube0002ypfom8ymvuob' },
-    { prompt: 'What does a derivative actually measure?', storyboardId: 'cmp8vdg7l0002ijcuhql2ryhz' },
-    { prompt: 'How does an electromagnetic wave travel?', storyboardId: 'cmp8vwvh3000rijcu4tywv2v1' },
-    { prompt: 'Visualize integration as area under a curve', storyboardId: 'cmp8y9ll20002ak5ldklfn1rj' },
-    { prompt: 'What is the Doppler effect?', storyboardId: 'cmpa3b7350002104f96a6nb9c' },
-    { prompt: 'Explain matrix multiplication geometrically', storyboardId: 'cmpa56rzn000d104f5k06jd31' },
-];
+const PROMPT_SUGGESTIONS: PromptSuggestion[] = DEMO_SUGGESTIONS;
 
 export function DashboardPage() {
     // ==========================================
@@ -224,8 +219,13 @@ export function DashboardPage() {
     // Auto-poll until final video is ready or pipeline fails
     useEffect(() => {
         if (!storyboard) return;
-        // Stop polling if we already have the final video or status is failed
-        if (storyboard.finalVideoUrl || storyboard.status === 'failed') return;
+        if (storyboard.status === 'failed') return;
+        // Stop once the video is ready — but keep polling while the server is
+        // still working, even though a video URL is present. A rebuild after a
+        // scene retry deliberately leaves the OLD video playable until the new
+        // one is assembled, so treating any URL as "done" would pin the viewer
+        // to the stale cut forever.
+        if (storyboard.finalVideoUrl && storyboard.status !== 'processing') return;
         // Poll faster than the old 3s so the final video URL doesn't sit
         // hidden for half a beat after the orchestrator writes it.
         const interval = setInterval(() => {
@@ -420,10 +420,11 @@ export function DashboardPage() {
     };
 
     const handleDownload = async () => {
-        if (!storyboard?.finalVideoUrl) return;
+        const videoUrl = resolveFinalVideoUrl(storyboard);
+        if (!videoUrl || !storyboard) return;
         try {
             await api.downloadVideo(
-                storyboard.finalVideoUrl,
+                videoUrl,
                 `${storyboard.title.replace(/[^a-z0-9]/gi, '_')}.mp4`
             );
         } catch {
@@ -434,6 +435,10 @@ export function DashboardPage() {
     // ==========================================
     // COMPUTED
     // ==========================================
+
+    // Bundled local copy when this is a demo clone, else the DB's Supabase
+    // URL. Null until the render actually finished — see `data/demos.ts`.
+    const finalVideoUrl = resolveFinalVideoUrl(storyboard);
 
     const completedScenes = storyboard?.scenes.filter((s) => s.status === 'completed').length || 0;
     const totalScenes = storyboard?.scenes.length || 0;
@@ -1453,15 +1458,15 @@ export function DashboardPage() {
                         )}
 
                         {/* Final video */}
-                        {storyboard.finalVideoUrl && (
+                        {finalVideoUrl && (
                             <div className="glass-card rounded-2xl p-5 space-y-4">
                                 <h3 className="text-sm font-semibold text-slate-400">
                                     🎬 Your Video Is Ready
                                 </h3>
                                 <div className="space-y-3">
                                     <VideoPlayer
-                                        key={storyboard.finalVideoUrl}
-                                        videoUrl={storyboard.finalVideoUrl}
+                                        key={finalVideoUrl}
+                                        videoUrl={finalVideoUrl}
                                         title={storyboard.title}
                                         className="aspect-video"
                                     />

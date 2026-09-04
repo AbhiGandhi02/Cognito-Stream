@@ -48,7 +48,7 @@ async function resolveExample(video: ExampleVideo): Promise<ResolvedExample> {
 
 function ExampleCard({ video, onPlay }: { video: ExampleVideo; onPlay: (v: ExampleVideo) => void }) {
     const videoRef = useRef<HTMLVideoElement>(null);
-    const [metadataLoaded, setMetadataLoaded] = useState(false);
+    const [thumbReady, setThumbReady] = useState(false);
     const [isHovered, setIsHovered] = useState(false);
 
     // Hover/focus → autoplay muted preview; leave → pause and reset to the
@@ -64,14 +64,13 @@ function ExampleCard({ video, onPlay }: { video: ExampleVideo; onPlay: (v: Examp
         }
     }, [isHovered]);
 
-    // Some browsers paint a black frame until currentTime nudges off zero.
-    // Forcing a microscopic seek after metadata loads guarantees a real poster.
-    const handleLoadedMetadata = () => {
-        const v = videoRef.current;
-        if (!v) return;
-        try { v.currentTime = 0.05; } catch { /* ignore */ }
-        setMetadataLoaded(true);
-    };
+    // These are Manim animations: they fade in from a black background, so
+    // frame 0 is essentially empty. Nudging currentTime forward on load (as
+    // this used to) painted that black frame straight over the poster and
+    // left every card looking blank. The poster jpg — a frame grabbed from
+    // partway through the video — is the resting thumbnail instead, and the
+    // <video> only becomes visible once hover starts playback.
+    const handleLoadedMetadata = () => setThumbReady(true);
 
     return (
         <button
@@ -86,7 +85,7 @@ function ExampleCard({ video, onPlay }: { video: ExampleVideo; onPlay: (v: Examp
             <div className="relative aspect-video overflow-hidden bg-black">
                 {/* Gradient placeholder — shown until the first frame paints */}
                 <div
-                    className={`absolute inset-0 bg-linear-to-br ${video.gradient} flex items-center justify-center transition-opacity duration-500 ${metadataLoaded ? 'opacity-0' : 'opacity-100'
+                    className={`absolute inset-0 bg-linear-to-br ${video.gradient} flex items-center justify-center transition-opacity duration-500 ${thumbReady ? 'opacity-0' : 'opacity-100'
                         }`}
                 >
                     <span className="text-4xl font-bold text-white/40 select-none">
@@ -104,6 +103,7 @@ function ExampleCard({ video, onPlay }: { video: ExampleVideo; onPlay: (v: Examp
                         src={video.posterUrl}
                         alt=""
                         aria-hidden="true"
+                        onLoad={() => setThumbReady(true)}
                         className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.04]"
                     />
                 )}
@@ -117,7 +117,7 @@ function ExampleCard({ video, onPlay }: { video: ExampleVideo; onPlay: (v: Examp
                     preload="metadata"
                     onLoadedMetadata={handleLoadedMetadata}
                     aria-hidden="true"
-                    className={`absolute inset-0 w-full h-full object-cover transition-[opacity,transform] duration-700 ${metadataLoaded ? 'opacity-100' : 'opacity-0'
+                    className={`absolute inset-0 w-full h-full object-cover transition-[opacity,transform] duration-700 ${(video.posterUrl ? isHovered : thumbReady) ? 'opacity-100' : 'opacity-0'
                         } group-hover:scale-[1.04]`}
                 />
 

@@ -29,8 +29,8 @@ contains live keys. Before you push anything to GitHub:
 1. Confirm `server/.env` and root `.env` are gitignored (they are — `.gitignore:7` matches `*.env`)
 2. Rotate the Supabase database password, JWT secret, and service-role key in
    the Supabase dashboard
-3. Get a fresh Gemini key from Google AI Studio and a fresh Groq key from
-   console.groq.com — both free
+3. Get a fresh Gemini key from Google AI Studio. Optionally create a second
+   key in a project with NO billing attached to use as the free-tier primary
 4. Update your local `server/.env` and root `.env` with the new values
 
 ---
@@ -157,11 +157,10 @@ curl https://<your-username>-cognito-stream-renderer.hf.space/health
 | `SUPABASE_JWT_SECRET`       | (your rotated JWT secret)                                 |
 | `RENDERER_URL`              | `https://<your-username>-cognito-stream-renderer.hf.space`|
 | `CLIENT_URL`                | (Vercel URL — you'll fill this in Step 5)                 |
-| `GEMINI_API_KEY`            | (rotated key)                                             |
-| `GEMINI_MODEL`              | `gemini-2.5-flash`                                        |
-| `GEMINI_CODE_MODEL`         | `gemini-2.5-flash`                                        |
-| `GROQ_API_KEY`              | (rotated key)                                             |
-| `GROQ_MODEL`                | `llama-3.3-70b-versatile`                                 |
+| `GEMINI_API_KEY_PRIMARY`    | (free-tier key — tried first)                             |
+| `GEMINI_API_KEY_SECONDARY`  | (paid key — quota fallback)                               |
+| `GEMINI_MODEL`              | `gemini-3.7-flash`                                        |
+| `GEMINI_CODE_MODEL`         | `gemini-3.7-flash`                                        |
 
 5. Click **Create Web Service**. First build takes ~3–5 min.
 
@@ -241,5 +240,4 @@ DATABASE_URL="<production-url>" node check_db.mjs
 | Hugging Face      | Free Docker Space   | $0           |
 | Supabase          | Free plan           | $0           |
 | Google Cloud (LLM)| Gemini free quota   | $0 (10 RPM)  |
-| Groq              | Free API            | $0           |
 | **Total**         |                     | **$0**       |

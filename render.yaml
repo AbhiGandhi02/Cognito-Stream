@@ -39,19 +39,26 @@ services:
       - key: CLIENT_URL
         sync: false
 
-      # LLM keys. Primary preferred; secondary is a manual fallback.
+      # LLM keys. PRIMARY is the free-tier key; SECONDARY is the paid key
+      # that takes over when the free tier hits a quota error.
       - key: GEMINI_API_KEY_PRIMARY
         sync: false
       - key: GEMINI_API_KEY_SECONDARY
         sync: false
+      # Planning / general text — the easy task, one call per video.
       - key: GEMINI_MODEL
         value: gemini-2.5-flash
+      # Manim code generation and repair — the hard task. A weaker model here
+      # means more broken scripts, and each repair costs another full render.
       - key: GEMINI_CODE_MODEL
-        value: gemini-2.5-flash
-      - key: GROQ_API_KEY
-        sync: false
-      - key: GROQ_MODEL
-        value: llama-3.3-70b-versatile
+        value: gemini-3.7-flash
+
+      # Parallel scene renders. Matched to the renderer's CPU count below
+      # (standard plan = 1 CPU); Manim is CPU-bound, so a higher value only
+      # timeshares one core and crowds 2GB of RAM. Raise this together with
+      # the renderer plan, not on its own.
+      - key: SCENE_CONCURRENCY
+        value: "2"
 
   # -----------------------------------------------------------------
   # Manim renderer — Docker, Python + FFmpeg + LaTeX + Piper TTS.

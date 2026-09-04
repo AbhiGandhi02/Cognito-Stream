@@ -49,7 +49,7 @@ const team: { name: string; role: string; img?: string; links?: { kind: 'mail' |
     {
         name: 'Abhi Gandhi',
         role: 'Founder & Engineer',
-        img: "/Abhi's%20Cognito.png",
+        img: "/Abhi_Pfp.png",
         links: [
             { kind: 'mail', href: `mailto:${SUPPORT_EMAIL}` },
             { kind: 'linkedin', href: LINKEDIN_URL },

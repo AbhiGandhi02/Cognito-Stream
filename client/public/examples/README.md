@@ -1,58 +1,75 @@
 # Example Videos
 
-The 6 pre-recorded MP4s shown on the landing page **no longer live in this
-directory** — they're stored in Supabase Storage at
-`cognito-stream/examples/<slug>.mp4` and served via public URLs:
+The 6 pre-recorded MP4s shown on the landing page live **in this directory**,
+served as static assets from the site root (`/examples/<slug>.mp4`).
 
+They used to be fetched at runtime: each card called
+`/api/public/storyboard/:id` on the API server, read `finalVideoUrl` off the
+response, and only then started downloading the mp4 from Supabase Storage.
+On the free tier that meant a cold-starting server plus a storage round-trip
+before the gallery showed anything. Serving them from `public/` removes both
+hops — the videos come off the same CDN as the JS bundle.
+
+Each video has a tiny (~1 KB) first-frame `.jpg` next to it, used as the
+`poster` so the card paints before the mp4's metadata arrives.
+
+The slug list and metadata (titles, descriptions, durations, gradients) live
+in [`client/src/data/examples.ts`](../../src/data/examples.ts), where
+`EXAMPLES_BASE_URL` is the `/examples` path prefix.
+
+## Files
+
+| File                            | Topic                              |
+|---------------------------------|------------------------------------|
+| `pythagorean-theorem.mp4/.jpg`  | a² + b² = c² (Mathematics)         |
+| `bubble-sort.mp4/.jpg`          | Bubble Sort visualization          |
+| `pendulum-motion.mp4/.jpg`      | Simple Pendulum / SHM (Physics)    |
+| `binary-search.mp4/.jpg`        | Binary Search                      |
+| `fourier-series.mp4/.jpg`       | Fourier series of a square wave    |
+| `wave-interference.mp4/.jpg`    | Two-source wave interference       |
+
+Total ~15 MB. Keep it that way — anything much larger belongs in the bucket.
+
+## Backup copy in the bucket (not used at runtime)
+
+Every file here is also mirrored to Supabase Storage at
+`cognito-stream/examples/<name>` as a backup. **Nothing reads it** — the app
+only ever loads `/examples/...` from the client's own origin. It exists so the
+videos survive a lost checkout, and so a bucket copy can be pulled back down.
+
+Re-push the mirror after changing any file here:
+
+```bash
+curl -X POST "$SUPABASE_URL/storage/v1/object/cognito-stream/examples/<name>" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Content-Type: video/mp4" -H "x-upsert: true" \
+  --data-binary @client/public/examples/<name>
 ```
-https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/public/cognito-stream/examples/<slug>.mp4
-```
 
-The slug list and metadata (titles, descriptions, gradients) live in
-[`client/src/data/examples.ts`](../../src/data/examples.ts). The base URL is
-defined as a constant at the top of that file.
-  
-## Required filenames in the bucket
+The dashboard's suggestion videos are mirrored the same way under
+`cognito-stream/demos/` — see `client/src/data/demos.ts`.
 
-| Object key                                    | Topic                              |
-|-----------------------------------------------|------------------------------------|
-| `examples/pythagorean-theorem.mp4`            | a² + b² = c² (Mathematics)         |
-| `examples/bubble-sort.mp4`                    | Bubble Sort visualization          |
-| `examples/pendulum-motion.mp4`                | Simple Pendulum / SHM (Physics)    |
-| `examples/binary-search.mp4`                  | Binary Search                      |
-| `examples/fourier-series.mp4`                 | Fourier series of a square wave    |
-| `examples/wave-interference.mp4`              | Two-source wave interference       |
-
-## How to (re)generate the example videos
-
-The cleanest path is to use the app itself in dev:
+## How to (re)generate an example video
 
 1. Start the renderer + server + client (`docker compose up renderer`,
    `npm run dev` in both).
-2. From the dashboard, prompt for one of the six topics (e.g.,
-   "Explain bubble sort with a 5-element array").
+2. From the dashboard, prompt for the topic (e.g. "Explain bubble sort with a
+   5-element array").
 3. Click **Generate Code** → **Render Final Video**.
-4. When the storyboard reaches `completed`, find the `_final.mp4` in
-   `storage/output/` (named like `<storyboardId>_final.mp4`).
-5. Rename it to the matching slug above and upload via Supabase dashboard
-   (Storage → cognito-stream → examples/) **or** via curl:
+4. When the storyboard reaches `completed`, grab the `_final.mp4` from
+   `storage/output/` (named `<storyboardId>_final.mp4`), or the uploaded copy
+   under `videos/` in the bucket if Supabase creds were set.
+5. Drop it here as `<slug>.mp4` and refresh the poster:
 
    ```bash
-   curl -X POST "https://oianisuconpjdrlnhvsw.supabase.co/storage/v1/object/cognito-stream/examples/<slug>.mp4" \
-     -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
-     -H "Content-Type: video/mp4" \
-     -H "x-upsert: true" \
-     --data-binary @<your-local-file>.mp4
+   ffmpeg -y -i <slug>.mp4 -vf "select=eq(n\,0),scale=480:-1" -frames:v 1 -q:v 6 <slug>.jpg
    ```
 
-6. Repeat for the remaining topics.
+6. Commit both files. No redeploy dance beyond the normal client deploy.
 
-## Why the bucket and not `client/public/`?
+## Adding an example without checking in a binary
 
-Vercel's free tier handles 5 MB of static videos fine, but moving them out of
-the repo:
-
-- Keeps the React client bundle small and fast to deploy.
-- Lets you swap example videos without a redeploy (just upload a new mp4 with
-  the same key — the bucket allows upsert).
-- Keeps git history clean of binary blobs.
+`examples.ts` still supports the old model: give an entry a `storyboardId`
+instead of a `videoUrl` and the landing page resolves it at runtime through
+`/api/public/storyboard/:id`. Slower to first paint, but no repo weight —
+useful for a one-off or while evaluating a new example.
