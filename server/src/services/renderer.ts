@@ -284,6 +284,46 @@ export async function assembleVideo(
 /**
  * Check renderer service health
  */
+/**
+ * Delete a storyboard's previously assembled final video (and voice track).
+ *
+ * Best-effort: a failure here must never block the rebuild that follows, so
+ * this resolves rather than throwing. Deletes by the URL recorded in the
+ * database, not a recomputed path — the storage path is built from the
+ * storyboard title, so a title change would otherwise strand the old object
+ * in the bucket permanently.
+ */
+export async function deleteFinalVideo(
+    videoUrl?: string | null,
+    audioUrl?: string | null
+): Promise<{ deleted: string[]; missing: string[]; failed: unknown[] }> {
+    const empty = { deleted: [], missing: [], failed: [] };
+    if (!videoUrl && !audioUrl) return empty;
+
+    try {
+        const response = await axios.post(
+            `${RENDERER_URL}/delete-final`,
+            { videoUrl: videoUrl ?? null, audioUrl: audioUrl ?? null },
+            { timeout: 30000, headers: { 'Content-Type': 'application/json' } }
+        );
+        const data = response.data ?? {};
+        if (data.deleted?.length) {
+            console.log(`🗑️  Removed previous final video: ${data.deleted.join(', ')}`);
+        }
+        return {
+            deleted: data.deleted ?? [],
+            missing: data.missing ?? [],
+            failed: data.failed ?? [],
+        };
+    } catch (error) {
+        const msg = axios.isAxiosError(error)
+            ? `HTTP ${error.response?.status ?? error.code}`
+            : String((error as Error)?.message ?? error);
+        console.warn(`⚠️  Could not delete previous final video (${msg}) — continuing.`);
+        return empty;
+    }
+}
+
 export async function checkRendererHealth(): Promise<{
     status: string;
     uptime: number;

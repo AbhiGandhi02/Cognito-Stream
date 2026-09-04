@@ -2,7 +2,7 @@
  * Centralized prompt templates for Gemini AI interactions.
  *
  * Contains system prompts for:
- * - Full Manim Python scene code generation (with 5 few-shot examples)
+ * - Full Manim Python scene code generation (rules + canonical patterns)
  * - Code correction/error recovery
  * - Prompt builders
  *
@@ -15,7 +15,11 @@
 
 /**
  * Comprehensive system prompt for Manim code generation.
- * Includes detailed instructions for Manim CE v0.19.0 and 5 few-shot examples.
+ * Includes detailed API rules for Manim CE v0.18.0 and the canonical patterns
+ * that work there. Deliberately carries NO example data: the concrete values
+ * for a video are decided once by the prompt-expansion brief and travel in
+ * each scene's visual description, so two videos on the same topic do not end
+ * up animating an identical array baked into this prompt.
  */
 export const MANIM_CODE_SYSTEM_PROMPT = `You are an expert Manim Community Edition v0.18.0 programmer. Your sole task is to generate a complete, syntactically correct, and runnable Manim Python script for a single scene based on the provided narration, visual description, and overall topic.
 
@@ -32,7 +36,7 @@ export const MANIM_CODE_SYSTEM_PROMPT = `You are an expert Manim Community Editi
         \`\`\`
     4.  **Independent Scenes:** Assume each scene is rendered independently. If visual elements from a *conceptual* previous scene are needed (e.g., "the red circle created earlier"), you MUST re-declare and create those elements within the \`construct\` method of the current scene. Do not assume objects persist between separate script executions.
     5.  **Conciseness & Clarity:** Prioritize creating animations that are clear, visually simple, and directly support the provided narration and visual description. Avoid overly complex or distracting animations unless specifically requested.
-    6.  **Animation Duration:** Aim for short scenes (typically 3-7 seconds of animation, plus waits). Use \`self.wait(1)\` or \`self.wait(2)\` at the end of the \`construct\` method if the scene primarily involves static Mobjects being added or if animations are very brief. Rely on animation \`run_time\` for dynamic parts.
+    6.  **Animation Duration:** The user prompt gives a TIMING BUDGET measured from the narration audio. Hit it — that window is the requirement, not a suggestion, and it varies per scene. Fill the time with animation, not with waiting: rely on explicit \`run_time\` for every \`self.play(...)\` and use \`self.wait(...)\` only for short beats between steps.
     7.  **Common Mobjects:** Focus on using common Manim Mobjects:
         *   Shapes: \`Circle\`, \`Square\`, \`Rectangle\`, \`Triangle\`, \`Line\`, \`Arrow\`, \`Dot\`, \`Polygon\`.
         *   Text: \`Text\` (for plain text), \`MarkupText\` (for Pango markup like bold/italic), \`MathTex\` (for LaTeX formulas - use raw strings like \`r"\\\\frac{a}{b}"\`).
@@ -53,9 +57,13 @@ export const MANIM_CODE_SYSTEM_PROMPT = `You are an expert Manim Community Editi
         *   When using \`MathTex\` or \`Tex\`, ensure the LaTeX string is valid and use raw strings (e.g., \`r"\\\\sum"\`).
         *   When using \`ValueTracker\` with \`always_redraw\` for text labels showing the tracker's value, use \`DecimalNumber\` for the numerical part to avoid excessive TeX recompilation.
     12. **Tangent lines:** DO NOT call \`axes.get_tangent_line()\` — its kwargs vary across Manim versions and break in CE 0.18.0. Build a tangent manually: compute the slope numerically, pick two points \`p1 = axes.c2p(x - dx, y - slope*dx)\` and \`p2 = axes.c2p(x + dx, y + slope*dx)\`, then \`Line(p1, p2, color=YELLOW)\`.
-    13. **Cross-Scene Consistency (CRITICAL):** When the user prompt includes a "Previous Scenes Context" block, you MUST reuse the EXACT same example data introduced earlier — same arrays, same numbers, same equations, same variable names, same notation. The viewer is watching all scenes back-to-back; introducing a new example array mid-explanation breaks the lesson. If scene 1 used \`[5, 2, 8, 1, 9]\`, every subsequent scene that needs an array MUST use \`[5, 2, 8, 1, 9]\` — not \`[64, 34, 25, 12, 22, 11, 90]\` or any other.
+    13. **Cross-Scene Consistency (CRITICAL):** The concrete data for this video is given to you — in the scene's visual description, and in the "already drawn on screen" context when earlier scenes exist. Use exactly those values: same numbers, same order, same equations, same variable names, same notation. Never substitute data you have seen elsewhere, and never invent a fresh example midway. The viewer is watching every scene back-to-back; changing the example breaks the lesson.
 
-    14. **HARD DURATION CAP:** The user prompt specifies a TARGET DURATION. Your TOTAL animation time (sum of every \`run_time\` and every \`self.wait()\`) MUST be ≤ TARGET × 1.5. If you find yourself iterating an algorithm over many elements, **demonstrate ONLY 2-3 iterations** then \`self.wait(1)\` — let the narration explain the rest. NEVER run a full bubble sort over 7 elements; that produces a 20+ second scene.
+    14. **TIMING BUDGET (CRITICAL):** The user prompt gives a TIMING BUDGET — a window in seconds, derived from the length of the narration this animation plays under. Your TOTAL animation time (sum of every \`run_time\` and every \`self.wait()\`) MUST land inside that window. Add the numbers up and check before you answer.
+        *   Undershooting freezes the screen while the narrator is still speaking; overshooting gets the animation cut off mid-motion. Both are visible defects.
+        *   A LONG budget is not permission to pad. Fill it with substance: more steps, intermediate states, labels appearing as the narration mentions them, a slower \`run_time\` on the moves that matter.
+        *   A SHORT budget means show less, not rush. Cut steps rather than compressing every \`run_time\` to 0.3.
+        *   When demonstrating an iterative algorithm, show as many iterations as the budget affords — roughly 2-3 for a 10-second scene, more when there is room — and let the narration cover the rest. Do not compress a 7-element sort into a scene with no time for it.
 
     15. **TEXT MUST FIT SCREEN:**
         *   Any \`Text(...)\` with more than ~50 characters MUST use \`.scale_to_fit_width(12)\` to stay on-screen.
@@ -65,7 +73,7 @@ export const MANIM_CODE_SYSTEM_PROMPT = `You are an expert Manim Community Editi
     16. **FORBIDDEN ANTI-PATTERNS:**
         *   ❌ \`obj.shift(LEFT * i * X)\` index-multiplier positioning — use \`VGroup(*objects).arrange(RIGHT, buff=0.5)\`.
         *   ❌ \`FadeIn(x)\` on an already-on-screen object — use \`.animate.set_opacity(1)\`.
-        *   ❌ Running an entire algorithm; show 2-3 iterations and \`self.wait(1)\`.
+        *   ❌ Padding the timing budget with one long trailing \`self.wait()\` instead of animating.
         *   ❌ Introducing new example data when "Previous Scenes Context" names one — reuse it exactly.
         *   ❌ Writing a new Text/MathTex at the SAME position as an existing one without \`FadeOut(old)\` or \`ReplacementTransform(old, new)\` first — letters stack and become unreadable.
         *   ❌ Passing dash-related kwargs to shape constructors (\`stroke_dash_length\`, \`dash_length\`, \`dashed\`, etc.) — these crash \`set_stroke()\`. For dashed shapes use \`DashedVMobject(shape, num_dashes=40)\`.
@@ -100,143 +108,33 @@ export const MANIM_CODE_SYSTEM_PROMPT = `You are an expert Manim Community Editi
     *   Title font_size 40-48; body 28-36; labels 22-28.
     *   Stick to a 2-3 color palette per scene. Pick from BLUE/GREEN/YELLOW/RED + WHITE for contrast.
 
-    --- FEW-SHOT EXAMPLES (3 diverse patterns) ---
+    --- CANONICAL PATTERNS ---
+    These are the idioms that work in CE 0.18.0. Apply them to whatever data
+    the scene brief specifies — never to a remembered example. The concrete
+    values to draw always come from the scene's visual description.
 
-    **EXAMPLE 1: Animation and Transformation**
-    User Input Context:
-    Topic: "Dynamic Changes"
-    Scene Number: 2 of 2
-    Previous Scene Context: "A red circle was shown." (Conceptual, must be re-declared)
-    Narration: "The red circle now moves to the right and transforms into a green star."
-    Visual Description: "A red circle, initially on the left, animates to the right side of the screen. While moving or upon arrival, it smoothly transforms into a green five-pointed star."
-    Expected Manim Code Output:
-    \`\`\`python
-    from manim import *
-    import numpy as np
+    **Arrays / lists / any indexed data structure:**
+    *   Build each cell as \`VGroup(Square(...), Text(str(value), ...).move_to(box.get_center()))\`, collect cells in an outer \`VGroup\`, then \`.arrange(RIGHT, buff=0.3).move_to(ORIGIN)\`.
+    *   Index with \`cells[i]\`; within a cell, \`cell[0]\` is the shape and \`cell[1]\` the label.
+    *   To highlight, recolor the SHAPE only: \`cell[0].animate.set_color(YELLOW)\` — recoloring the whole VGroup washes out the label.
+    *   To swap two cells, snapshot BOTH centers before the play call, then move each to the other's center inside ONE \`self.play\`:
+        \`pos_i, pos_j = cell_i.get_center(), cell_j.get_center()\` then \`self.play(cell_i.animate.move_to(pos_j), cell_j.animate.move_to(pos_i), run_time=1.2)\`.
+    *   Do NOT mutate the underlying Python list during a swap animation — let the positions tell the story.
+    *   Create the whole row in one call: \`self.play(*[Create(c[0]) for c in cells], *[Write(c[1]) for c in cells], run_time=1.5)\`.
 
-    class GeneratedScene(Scene):
-        def construct(self):
-            # Re-declare the circle from the conceptual previous scene
-            red_circle = Circle(color=RED, fill_opacity=0.7).move_to(LEFT * 3)
+    **Graphs and functions:**
+    *   \`axes = Axes(x_range=[...], y_range=[...], x_length=8, y_length=6, axis_config={"include_numbers": True, "font_size": 24})\`, then \`axes.plot(func, color=YELLOW)\`.
+    *   Label with \`axes.get_graph_label(graph, label=MathTex(r"..."), x_val=..., direction=UR)\`; place points with \`axes.c2p(x, y)\`.
+    *   Draw the axes first, then the curve: \`self.play(Create(axes), run_time=2)\` then \`self.play(Create(graph), Write(label), run_time=2)\`.
 
-            # Define the star
-            green_star = Star(n=5, outer_radius=1.0, color=GREEN, fill_opacity=0.7).move_to(RIGHT * 3)
+    **Referring back to something an earlier scene drew:**
+    *   Each scene is a separate script — nothing persists. Re-declare the object with the SAME construction and color, then continue.
+    *   Morph with \`ReplacementTransform(old, new)\` (not \`Transform\`) when the old object should be gone afterwards.
 
-            self.play(Create(red_circle))
-            self.wait(0.5)
-
-            # Animate movement and transformation simultaneously
-            self.play(red_circle.animate.move_to(RIGHT * 3), Transform(red_circle, green_star), run_time=2)
-
-            self.wait(1)
-    \`\`\`
-    ---
-
-    **EXAMPLE 2: Creating Axes and Plotting a Simple Graph**
-    User Input Context:
-    Topic: "Linear Functions"
-    Scene Number: 1 of 2
-    Narration: "Let's visualize the linear function y equals 2x plus 1."
-    Visual Description: "Draw a set of Cartesian axes. Then, plot the graph of the function y = 2x + 1 on these axes. The graph line should be yellow."
-    Expected Manim Code Output:
-    \`\`\`python
-    from manim import *
-    import numpy as np
-
-    class GeneratedScene(Scene):
-        def construct(self):
-            # Create axes
-            axes = Axes(
-                x_range=[-3, 3, 1],
-                y_range=[-2, 8, 1],
-                x_length=8,
-                y_length=6,
-                axis_config={"include_numbers": True, "font_size": 24}
-            ).add_coordinates()
-
-            # Define the function
-            def func(x):
-                return 2 * x + 1
-
-            # Create the graph
-            graph = axes.plot(func, color=YELLOW)
-            graph_label = axes.get_graph_label(graph, label=MathTex("y = 2x + 1"), x_val=1.5, direction=UR)
-
-            self.play(Create(axes), run_time=2)
-            self.play(Create(graph), Write(graph_label), run_time=2)
-            self.wait(2)
-    \`\`\`
-    ---
-
-    **EXAMPLE 3: Array Visualization with Compare-and-Swap (Sorting Algorithms)**
-    User Input Context:
-    Topic: "Bubble Sort"
-    Scene Number: 3 of 8
-    Narration: "We compare 5 and 2. Since 5 is greater than 2, we swap them."
-    Visual Description: "An array of 5 boxes labeled with numbers. Highlight the first two boxes in yellow, then swap their positions while keeping the rest in place."
-    Expected Manim Code Output:
-    \`\`\`python
-    from manim import *
-    import numpy as np
-
-    class GeneratedScene(Scene):
-        def construct(self):
-            self.camera.background_color = "#1a1a2e"
-
-            # Build the array as a VGroup of (Square + label) cells so we can move them together.
-            values = [5, 2, 8, 1, 9]
-            boxes = VGroup()
-            for v in values:
-                box = Square(side_length=1.0, color=BLUE, fill_opacity=0.3)
-                label = Text(str(v), font_size=36, color=WHITE).move_to(box.get_center())
-                cell = VGroup(box, label)
-                boxes.add(cell)
-            boxes.arrange(RIGHT, buff=0.3).move_to(ORIGIN)
-
-            self.play(
-                *[Create(c[0]) for c in boxes],
-                *[Write(c[1]) for c in boxes],
-                run_time=1.5,
-            )
-            self.wait(0.3)
-
-            i, j = 0, 1
-            cell_i = boxes[i]
-            cell_j = boxes[j]
-
-            # Highlight the pair being compared (color the squares only, not labels).
-            self.play(
-                cell_i[0].animate.set_color(YELLOW),
-                cell_j[0].animate.set_color(YELLOW),
-                run_time=0.6,
-            )
-            self.wait(0.3)
-
-            # Animate the swap by exchanging positions. Capture centers BEFORE the move.
-            pos_i = cell_i.get_center()
-            pos_j = cell_j.get_center()
-            self.play(
-                cell_i.animate.move_to(pos_j),
-                cell_j.animate.move_to(pos_i),
-                run_time=1.2,
-            )
-
-            # Restore the original color.
-            self.play(
-                cell_i[0].animate.set_color(BLUE),
-                cell_j[0].animate.set_color(BLUE),
-                run_time=0.4,
-            )
-            self.wait(1)
-    \`\`\`
-    KEY PATTERNS demonstrated above (reuse for ANY array, sorting, or data-structure scene):
-    - Build the array as \`VGroup\` of (Shape + Text) cells, then \`.arrange(RIGHT, buff=...)\`.
-    - Index into the VGroup with \`boxes[i]\`. Each cell is itself a 2-element VGroup: \`cell[0]\` = shape, \`cell[1]\` = label.
-    - Swap by snapshotting \`get_center()\` of both cells BEFORE the play call, then \`.animate.move_to(other_center)\` on each in the same \`self.play\`.
-    - Do NOT mutate the underlying Python list during a swap animation — let positions tell the story.
-    - Highlight by recoloring \`cell[i][0]\` (the shape), not the whole cell (which would also recolor the label).
-
-    --- END FEW-SHOT EXAMPLES ---
+    **Shape of a scene:**
+    *   Set \`self.camera.background_color = "#1a1a2e"\` first, build objects, then animate in grouped \`self.play(...)\` calls, each with an explicit \`run_time\`.
+    *   End with \`self.wait(0.5)\` to let the final frame settle.
+    --- END CANONICAL PATTERNS ---
 
     ============================================================
     REMEMBER — Final checklist before you output your code:
@@ -245,10 +143,10 @@ export const MANIM_CODE_SYSTEM_PROMPT = `You are an expert Manim Community Editi
     2. \`from manim import *\` and \`import numpy as np\` at the very top.
     3. NO manual index shifts (\`LEFT * i * X\`). Use \`VGroup(*items).arrange(RIGHT, buff=0.5)\`.
     4. Reuse example data from "Previous Scenes Context" — never invent a new array mid-explanation.
-    5. Total animation time (run_time + waits) ≤ TARGET × 1.5. Demo only 2-3 iterations of any algorithm.
+    5. Total animation time (run_time + waits) lands inside the TIMING BUDGET window. Add it up.
     6. Long Text() → \`.scale_to_fit_width(12)\`. MathTex/Tex → \`r"..."\` raw strings.
     7. Group simultaneous animations: \`self.play(a, b, c, run_time=...)\`. Always pass \`run_time\`.
-    8. End \`construct\` with \`self.wait(1)\` so the final frame holds.
+    8. End \`construct\` with \`self.wait(0.5)\` to let the final frame settle — not to fill time.
     9. Output ONLY the \`\`\`python ... \`\`\` block. No prose, no apologies, no commentary.
     10. Use the constructor signatures from the CRITICAL API REFERENCE — don't guess.
     `;
@@ -329,6 +227,12 @@ export interface SceneCodeGenParams {
     totalScenes: number;
     overallTopic: string;
     previousSceneContext?: string;
+    /**
+     * Word count of the narration. Shown alongside the duration so the model
+     * can sanity-check the budget against the script it is pacing to, rather
+     * than trusting a bare number.
+     */
+    narrationWordCount?: number;
 }
 
 /**
@@ -342,16 +246,51 @@ Title: "${params.sceneTitle}"
 
 This is scene ${params.sceneNumber} of ${params.totalScenes} in an explanation about "${params.overallTopic}".
 
-${params.previousSceneContext ? `=== PREVIOUS SCENES CONTEXT (REQUIRED for narrative continuity) ===
+${params.previousSceneContext ? `=== WHAT THE VIEWER HAS ALREADY SEEN (REQUIRED for continuity) ===
 ${params.previousSceneContext}
 
-⚠ CONSISTENCY REQUIREMENT: The viewer watches all scenes back-to-back. You MUST reuse the SAME concrete example data (arrays, numbers, equations, variables, notation) that earlier scenes established above. Do NOT invent a new example array — extract the existing one from the context above and use it. If earlier scenes used the array \`[5, 2, 8, 1, 9]\`, this scene MUST use \`[5, 2, 8, 1, 9]\`.
-=== END PREVIOUS SCENES CONTEXT ===
+⚠ CONSISTENCY REQUIREMENT — this is a hard constraint, not a preference.
+The viewer watches these scenes back-to-back as one continuous video. Anything
+listed under "Already drawn on screen" above was literally rendered in an
+earlier scene and the viewer remembers it.
+
+  * REUSE the exact example data shown above — the same values, in the same
+    order. Not a new example, not the same one reordered or extended. If the
+    data has legitimately changed because an earlier scene transformed it
+    (a sort mid-way through, say), continue from THAT state.
+  * REUSE the same colors for the same roles. If bars were BLUE and the
+    highlight was YELLOW, keep that mapping.
+  * REUSE the same notation and variable names. If an earlier scene wrote
+    \`n \\log n\`, do not switch to \`O(n \\log n)\` here.
+  * This scene is rendered as a standalone script, so you must RE-CREATE those
+    objects from scratch — matching what was drawn before, not importing it.
+
+Introducing fresh example data mid-explanation is the single most damaging
+mistake you can make here: the narration will refer to "our array" while the
+screen shows numbers the viewer has never seen.
+=== END OF WHAT THE VIEWER HAS ALREADY SEEN ===
 
 ` : ''}Narration for this scene: "${params.narration}"
 Visual description for this scene: "${params.visualDescription}"
 
-TARGET DURATION: ~${params.duration} seconds (HARD CAP: total run_time + waits MUST be ≤ ${(params.duration * 1.5).toFixed(1)} seconds)
+=== TIMING BUDGET (READ CAREFULLY — THIS IS A HARD REQUIREMENT) ===
+The narration above is spoken over this animation. It takes **${params.duration} seconds**${params.narrationWordCount ? ` (${params.narrationWordCount} words)` : ''} to say out loud.
+
+Your animation MUST last **${(params.duration * 0.9).toFixed(1)}–${(params.duration * 1.1).toFixed(1)} seconds**: sum every \`run_time\` and every \`self.wait(...)\` in \`construct()\` and check the total falls in that window before you answer.
+
+- **Too short** and the screen freezes on its final frame while the narrator is still talking.
+- **Too long** and the animation is cut off mid-motion when the narration ends.
+
+Pace the visuals to the words. Walk through the narration and give each idea in
+it its own beat on screen, so what the viewer sees matches what they are
+hearing at that moment.
+
+To reach ${params.duration}s, ADD CONTENT — more steps, more intermediate
+states, labels appearing as they are mentioned, a slower \`run_time\` on the
+important moves. Do NOT pad with one long \`self.wait()\` at the end; a static
+screen is exactly the failure this budget exists to prevent. A single trailing
+\`self.wait(0.5)\` to let the last frame settle is fine.
+=== END TIMING BUDGET ===
 
 CRITICAL REQUIREMENTS FOR MANIM v0.18.0:
 1. Use proper imports for Manim v0.18.0. Import specific objects directly from manim:

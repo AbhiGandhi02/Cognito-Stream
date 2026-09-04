@@ -4,6 +4,7 @@ import { generateStoryboard } from '../services/gemini';
 import { generateAudio } from '../services/elevenlabs';
 import { triggerRenderer, assembleVideo } from '../services/renderer';
 import { processStoryboardScenes } from '../services/orchestrator';
+import { assembleStoryboard } from '../services/assembly';
 import { validateRequest } from '../middleware/validation';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { findDemoSource } from '../lib/demo';
@@ -32,9 +33,8 @@ function safeParseManimCode(manimCode: string | null): any {
 async function processAllScenes(storyboardId: string): Promise<void> {
   console.log(`🎬 Starting orchestrated pipeline for storyboard: ${storyboardId}`);
 
-  let result;
   try {
-    result = await processStoryboardScenes(storyboardId);
+    await processStoryboardScenes(storyboardId);
   } catch (orchestrationError) {
     const msg = orchestrationError instanceof Error ? orchestrationError.message : 'Unknown error';
     console.error('❌ Orchestration crashed:', msg);
@@ -45,69 +45,9 @@ async function processAllScenes(storyboardId: string): Promise<void> {
     return;
   }
 
-  // After orchestration, assemble final video from completed scenes
-  if (result.completedScenes > 0) {
-    try {
-      const completedScenes = await prisma.scene.findMany({
-        where: { storyboardId, status: 'completed', videoUrl: { not: null } },
-        orderBy: { sceneNumber: 'asc' },
-      });
-
-      if (completedScenes.length > 0) {
-        console.log(`🎞️ Assembling final video from ${completedScenes.length} scenes...`);
-
-        // Look up the storyboard title so the renderer can use it in the
-        // upload filename (videos/<slug>-<short-id>.mp4).
-        const sb = await prisma.storyboard.findUnique({
-          where: { id: storyboardId },
-          select: { title: true },
-        });
-
-        const assemblyResult = await assembleVideo(
-          storyboardId,
-          completedScenes.map(s => ({
-            videoUrl: s.videoUrl!,
-            audioUrl: s.audioUrl || '',
-            duration: s.actualDuration || s.estimatedDuration,
-            sceneNumber: s.sceneNumber,
-          })),
-          'medium',
-          sb?.title || ''
-        );
-
-        await prisma.storyboard.update({
-          where: { id: storyboardId },
-          data: {
-            finalVideoUrl: assemblyResult.videoUrl,
-            totalDuration: assemblyResult.totalDuration,
-            status: 'completed',
-            errorMessage: null,
-          },
-        });
-
-        console.log(`🎉 Pipeline complete! Final video: ${assemblyResult.videoUrl}`);
-      }
-    } catch (assemblyError) {
-      const msg = assemblyError instanceof Error ? assemblyError.message : 'Unknown error';
-      console.error('❌ Final video assembly failed:', msg);
-      await prisma.storyboard.update({
-        where: { id: storyboardId },
-        data: {
-          status: 'failed',
-          errorMessage: `Final assembly failed: ${msg}`.slice(0, 2000),
-        },
-      });
-    }
-  } else {
-    console.log('⚠️ No scenes rendered successfully');
-    await prisma.storyboard.update({
-      where: { id: storyboardId },
-      data: {
-        status: 'failed',
-        errorMessage: `All ${result.totalScenes} scene(s) failed to render. See per-scene errors for details.`,
-      },
-    });
-  }
+  // After orchestration, assemble the final video from whatever completed.
+  // assembleStoryboard handles the all-scenes-failed case itself.
+  await assembleStoryboard(storyboardId);
 }
 
 // ==========================================
@@ -150,7 +90,17 @@ const listQuerySchema = z.object({
  * POST /api/storyboard/test
  * Create a test storyboard with hardcoded Manim code — NO AI credits used.
  * Scenes have complete, renderable Manim Python scripts baked in.
+ *
+ * Self-cleaning: every call first deletes this user's previous test
+ * storyboards. The render pipeline is DB-driven (it looks scenes up by id),
+ * so a test run has to write rows — but it never accumulates them. At most
+ * one test storyboard exists at a time and it disappears on the next run,
+ * which keeps diagnostic runs out of the permanent history.
  */
+const TEST_STORYBOARD_TITLE = 'Test: Cognito Stream Demo';
+const TEST_STORYBOARD_PROMPT =
+  'TEST: Cognito Stream demo with shapes, Pythagorean theorem, and linear graph';
+
 router.post(
   '/test',
   asyncHandler(async (req: Request, res: Response) => {
@@ -312,13 +262,29 @@ class GeneratedScene(Scene):
     // ── Create storyboard in DB ─────────────────────────────────────
 
     const userId = req.user!.id;
+
+    // Drop this user's earlier test runs first. Matched on title AND prompt
+    // so a real storyboard that happens to share a name is never touched,
+    // and scoped to userId so one admin's cleanup can't reach another's
+    // rows. Scenes go with them via ON DELETE CASCADE.
+    const purged = await prisma.storyboard.deleteMany({
+      where: {
+        userId,
+        title: TEST_STORYBOARD_TITLE,
+        prompt: TEST_STORYBOARD_PROMPT,
+      },
+    });
+    if (purged.count > 0) {
+      console.log(`🧹 Purged ${purged.count} previous test storyboard(s)`);
+    }
+
     const storyboard = await prisma.$transaction(async (tx) => {
       const newStoryboard = await tx.storyboard.create({
         data: {
           userId,
-          title: 'Test: Cognito Stream Demo',
+          title: TEST_STORYBOARD_TITLE,
           description: 'Hardcoded test storyboard — no AI credits used',
-          prompt: 'TEST: Cognito Stream demo with shapes, Pythagorean theorem, and linear graph',
+          prompt: TEST_STORYBOARD_PROMPT,
           status: 'draft',
           scenes: {
             create: testScenes.map((scene, index) => ({

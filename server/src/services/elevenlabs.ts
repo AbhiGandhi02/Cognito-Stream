@@ -8,6 +8,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { estimateNarrationSeconds } from '../lib/narrationTiming';
 
 const execAsync = promisify(exec);
 
@@ -105,8 +106,10 @@ export async function generateAudio(
     console.error(`⚠️ Audio generation failed: ${errorMessage}`);
     console.log('💡 Continuing without audio - video will use estimated duration');
 
-    // Graceful fallback: video pipeline still proceeds
-    const estimatedDuration = Math.ceil(text.length / 15);
+    // Graceful fallback: video pipeline still proceeds. Uses the same
+    // word-count estimate as the timing budget, so a TTS outage degrades to
+    // one consistent number instead of two that disagree.
+    const estimatedDuration = estimateNarrationSeconds(text);
     return {
       audioUrl: '',
       duration: estimatedDuration,

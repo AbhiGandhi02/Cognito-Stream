@@ -39,7 +39,6 @@
     "express": "^4.21.1",
     "express-rate-limit": "^7.4.1",
     "form-data": "^4.0.1",
-    "groq-sdk": "^1.1.2",
     "jose": "^6.2.3",
     "uuid": "^10.0.0",
     "zod": "^3.23.8"
@@ -59,6 +58,7 @@
     "prisma": "^5.22.0",
     "supertest": "^7.0.0",
     "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
   },

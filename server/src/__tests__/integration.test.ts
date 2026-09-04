@@ -3,7 +3,7 @@
 // server/src/__tests__/integration.test.ts
 // ==========================================
 
-import * as request from 'supertest';
+import request from 'supertest';
 import app from '../index';
 
 describe('Integration Tests - Full Video Generation Flow', () => {

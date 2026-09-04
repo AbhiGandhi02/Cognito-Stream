@@ -3,7 +3,7 @@
 // server/src/__tests__/utils.ts
 // ==========================================
 
-import * as request from 'supertest';
+import request from 'supertest';
 import app from '../index';
 import { prisma } from '../lib/prisma';
 

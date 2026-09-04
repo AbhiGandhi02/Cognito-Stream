@@ -4,8 +4,11 @@ import { generateAudio } from '../services/elevenlabs';
 import { triggerRenderer } from '../services/renderer';
 import { generateManimSceneCode } from '../services/gemini';
 import { processScene } from '../services/orchestrator';
+import { rebuildFinalVideo } from '../services/assembly';
 import { validateRequest } from '../middleware/validation';
 import { asyncHandler } from '../middleware/asyncHandler';
+import { resolveSceneDuration, countWords } from '../lib/narrationTiming';
+import { buildSceneContext } from '../services/sceneContext';
 import { z } from 'zod';
 
 const router = Router();
@@ -185,15 +188,21 @@ router.post(
       });
     }
 
-    // Build a previous-scenes context summary so the LLM keeps continuity
-    // (same example arrays, variables, equations across scenes).
-    const previousSceneContext = scene.storyboard.scenes
-      .filter((s) => s.sceneNumber < scene.sceneNumber)
-      .map(
-        (s) =>
-          `Scene ${s.sceneNumber} ("${s.visualDescription.slice(0, 80)}"): ${s.narration.slice(0, 200)}`
-      )
-      .join('\n');
+    // Build the previous-scenes context so the LLM keeps continuity. This
+    // includes each earlier scene's GENERATED CODE, not just its narration:
+    // the example array, colours and notation are chosen by the code
+    // generator, so a summary built from planning text alone could never tell
+    // this scene what to reuse.
+    const previousSceneContext = buildSceneContext(
+      scene.storyboard.scenes
+        .filter((s) => s.sceneNumber < scene.sceneNumber)
+        .map((s) => ({
+          sceneNumber: s.sceneNumber,
+          narration: s.narration,
+          visualDescription: s.visualDescription,
+          manimCode: s.manimCode,
+        }))
+    );
 
     // ---------------------------------------------------------------
     // Demo clone: if this scene's storyboard was cloned from a demo,
@@ -217,11 +226,19 @@ router.post(
       code = sourceScene.manimCode;
     } else {
       console.log(`🎨 Generating Manim code for scene ${scene.sceneNumber}: "${scene.visualDescription.slice(0, 50)}"`);
+      // Timing budget: the measured narration audio if this scene has already
+      // been voiced, otherwise a word-count estimate. Never the flat constant
+      // that used to make every scene target ~5 seconds regardless of script.
+      const targetDuration = resolveSceneDuration(
+        scene.narration,
+        scene.audioUrl ? scene.actualDuration : null
+      );
       code = await generateManimSceneCode({
         sceneTitle: `Scene ${scene.sceneNumber}`,
         narration: scene.narration,
         visualDescription: scene.visualDescription,
-        duration: scene.estimatedDuration,
+        duration: targetDuration,
+        narrationWordCount: countWords(scene.narration),
         sceneNumber: scene.sceneNumber,
         totalScenes: scene.storyboard.scenes.length,
         overallTopic: scene.storyboard.prompt,
@@ -273,11 +290,21 @@ router.post(
     }
 
     // Build the same previous-scene context the batch orchestrator uses, so
-    // continuity (variables, equations, examples) is preserved on retry.
-    const previousSceneContext = scene.storyboard.scenes
-      .filter((s) => s.sceneNumber < scene.sceneNumber && s.status === 'completed')
-      .map((s) => `Scene ${s.sceneNumber}: ${s.narration.slice(0, 200)}`)
-      .join('\n');
+    // continuity (example data, colours, notation) is preserved on retry.
+    //
+    // Not filtered to completed scenes: an earlier scene that failed to render
+    // still established what the lesson is talking about, and omitting it made
+    // the retry read as though nothing preceded it.
+    const previousSceneContext = buildSceneContext(
+      scene.storyboard.scenes
+        .filter((s) => s.sceneNumber < scene.sceneNumber)
+        .map((s) => ({
+          sceneNumber: s.sceneNumber,
+          narration: s.narration,
+          visualDescription: s.visualDescription,
+          manimCode: s.manimCode,
+        }))
+    );
 
     // Wipe stored code + reset state so processScene re-generates from scratch
     // (otherwise the AI-skip optimization would just retry the broken script).
@@ -310,6 +337,15 @@ router.post(
       scene.storyboard.scenes.length,
       previousSceneContext,
     );
+
+    // The storyboard's assembled video no longer reflects this scene. Rebuild
+    // it in the background — without this the scene row updates but
+    // finalVideoUrl still points at the old cut, and the dashboard (which
+    // stops polling once that URL is set) keeps showing a video missing the
+    // scene the user just fixed.
+    if (result.status === 'completed') {
+      await rebuildFinalVideo(scene.storyboardId);
+    }
 
     const fresh = await prisma.scene.findUnique({ where: { id } });
     return res.json({ ...fresh, processingResult: result });
@@ -383,6 +419,9 @@ router.post(
       });
 
       console.log(`✅ Scene ${scene.sceneNumber} completed successfully`);
+
+      // This scene's video changed — the assembled cut is now stale.
+      await rebuildFinalVideo(scene.storyboardId);
 
       return res.json({
         ...completedScene,
@@ -501,6 +540,9 @@ router.post(
           status: 'completed',
         },
       });
+
+      // This scene's video changed — the assembled cut is now stale.
+      await rebuildFinalVideo(scene.storyboardId);
 
       return res.json({
         ...updatedScene,

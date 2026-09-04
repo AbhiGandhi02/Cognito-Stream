@@ -17,6 +17,8 @@ import renderRouter from './routes/render';
 import meRouter from './routes/me';
 import adminRouter from './routes/admin';
 import { requireAuth, requireAdmin } from './middleware/auth';
+import { sanitizeUserErrors } from './middleware/sanitizeUserErrors';
+import { classifyUserError } from './services/userFacingError';
 
 // ==========================================
 // APP SETUP
@@ -76,7 +78,7 @@ app.get('/health/db', async (_req, res) => {
   }
 });
 
-// LLM health check — probes Gemini + Groq independently and reports cooldown state
+// LLM health check — probes each Gemini key and reports per-key cooldown state
 app.get('/api/health/llm', async (_req, res) => {
   try {
     const { pingLLMs } = await import('./services/gemini');
@@ -88,13 +90,16 @@ app.get('/api/health/llm', async (_req, res) => {
 });
 
 // Public (no-auth) read endpoints for the landing page demo videos.
-app.use('/api/public', publicRouter);
+app.use('/api/public', sanitizeUserErrors, publicRouter);
 
 // API Routes — all gated behind Supabase JWT verification
 app.use('/api/me', requireAuth, meRouter);
-app.use('/api/storyboard', requireAuth, storyboardRouter);
-app.use('/api/scene', requireAuth, sceneRouter);
-app.use('/api/render', requireAuth, renderRouter);
+// sanitizeUserErrors rewrites raw provider errors (e.g. a Gemini 429 telling
+// the viewer to "check your plan and billing details") into user-safe copy.
+// Deliberately NOT mounted on /api/admin — admins need the raw text.
+app.use('/api/storyboard', requireAuth, sanitizeUserErrors, storyboardRouter);
+app.use('/api/scene', requireAuth, sanitizeUserErrors, sceneRouter);
+app.use('/api/render', requireAuth, sanitizeUserErrors, renderRouter);
 // Admin routes — additionally require ADMIN role
 app.use('/api/admin', requireAuth, requireAdmin, adminRouter);
 
@@ -134,10 +139,15 @@ app.get('/videos/:filename', async (req, res) => {
 // ==========================================
 
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  // Full detail to the logs; only the mapped message goes over the wire.
   console.error('❌ Server Error:', err);
-  res.status(err.status || 500).json({
+  const status = err.status || 500;
+  res.status(status).json({
     error: err.name || 'Internal Server Error',
-    message: err.message || 'Something went wrong',
+    message:
+      status >= 500
+        ? classifyUserError(err?.message).message
+        : err.message || 'Something went wrong',
   });
 });
 
