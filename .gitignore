@@ -5,6 +5,11 @@ dist/
 *.log
 *.sqlite
 *.env
+# Backup/rotated env files (e.g. .env.bak.1788466093) — *.env above does NOT
+# match these, and they carry live keys. One of them got past push protection once.
+.env.bak*
+*.env.bak*
+.env.*.bak
 client/node_modules/
 server/node_modules/
 renderer/.venv/
