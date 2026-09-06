@@ -32,6 +32,16 @@ model Storyboard {
   // final video are copied lazily from the source as the user clicks
   // Generate Code / Render Final Video. Invisible to the user.
   demoSourceId    String?
+  // The video brief decided once by expandPrompt: the worked example, its
+  // literal values, key terms, the beat sheet and the scope note. Stored as
+  // JSON text because it is read whole and never queried into.
+  //
+  // Previously discarded after planning, which meant a scene retried later had
+  // no access to the example every other scene was built around — it could only
+  // infer it from its own visualDescription and facts scraped out of sibling
+  // scenes' Python. Also carries scopeNote, the brief's own statement of what
+  // it left out, which is the only record that a broad topic was narrowed.
+  brief           String?  @db.Text
 
   scenes          Scene[]
   user            User?    @relation(fields: [userId], references: [id], onDelete: Cascade)

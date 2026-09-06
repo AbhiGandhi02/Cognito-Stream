@@ -126,6 +126,9 @@ app.get('/videos/:filename', async (req, res) => {
     const response = await axios.get(`${RENDERER_URL}/videos/${req.params.filename}`, {
       responseType: 'stream',
       timeout: 30000,
+      headers: process.env.RENDERER_SHARED_SECRET
+        ? { 'X-Renderer-Token': process.env.RENDERER_SHARED_SECRET }
+        : {},
     });
     res.setHeader('Content-Type', response.headers['content-type'] || 'video/mp4');
     response.data.pipe(res);

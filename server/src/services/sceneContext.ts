@@ -81,8 +81,18 @@ function uniqueMatches(
     return [...seen];
 }
 
+/**
+ * Every scene sets `self.camera.background_color = "#1a1a2e"` because the
+ * system prompt requires it, so that hex was being reported to the next scene
+ * as an established palette colour — burning one of MAX_COLORS on a constant
+ * and diluting the colours that carry actual meaning.
+ */
+function stripBackgroundColor(code: string): string {
+    return code.replace(/background_color\s*=\s*[^,)\n]+/g, '');
+}
+
 export function extractSceneFacts(manimCode: string): SceneFacts {
-    const code = manimCode || '';
+    const code = stripBackgroundColor(manimCode || '');
     return {
         arrays: uniqueMatches(code, ARRAY_PATTERN, MAX_ARRAYS),
         colors: uniqueMatches(code, COLOR_PATTERN, MAX_COLORS),
@@ -125,6 +135,26 @@ function formatFacts(facts: SceneFacts): string[] {
     return parts;
 }
 
+// How much of each earlier scene to show.
+//
+// Not uniform, because earlier scenes matter for different reasons. The scene
+// immediately before this one governs continuity — what is still on screen,
+// what just moved — and the planner now writes that into the visual
+// description ("CARRIED OVER: ... NEW: ..."). Older scenes matter only for
+// keeping the example data, notation and colours consistent, and that lives in
+// the extracted facts, not the prose.
+//
+// A flat 100-char clip cut every description in half, and the half it removed
+// was the "what is new / what moves" half — the part the next scene needs
+// most. Widening it uniformly instead would grow the block O(N) per scene and
+// O(N^2) across a video, which matters now that a storyboard can run to 12
+// scenes.
+const RECENT_SCENES_IN_FULL = 2;
+const RECENT_VISUAL_CHARS = 280;
+const RECENT_NARRATION_CHARS = 260;
+const OLDER_VISUAL_CHARS = 100;
+const OLDER_NARRATION_CHARS = 120;
+
 /**
  * Render the continuity block handed to a scene's code-gen brief.
  *
@@ -139,11 +169,15 @@ export function buildSceneContext(entries: SceneContextEntry[]): string {
     if (ordered.length === 0) return '';
 
     const lines: string[] = [];
-    for (const entry of ordered) {
+    ordered.forEach((entry, index) => {
+        const isRecent = index >= ordered.length - RECENT_SCENES_IN_FULL;
+        const visualChars = isRecent ? RECENT_VISUAL_CHARS : OLDER_VISUAL_CHARS;
+        const narrationChars = isRecent ? RECENT_NARRATION_CHARS : OLDER_NARRATION_CHARS;
+
         lines.push(
-            `Scene ${entry.sceneNumber} — "${clip(entry.visualDescription, 100)}"`
+            `Scene ${entry.sceneNumber} — "${clip(entry.visualDescription, visualChars)}"`
         );
-        lines.push(`  Narration: ${clip(entry.narration, 260)}`);
+        lines.push(`  Narration: ${clip(entry.narration, narrationChars)}`);
 
         if (entry.manimCode) {
             const parts = formatFacts(extractSceneFacts(entry.manimCode));
@@ -155,6 +189,6 @@ export function buildSceneContext(entries: SceneContextEntry[]): string {
             // rather than letting its absence read as "nothing was established".
             lines.push('  (animation for this scene was not generated)');
         }
-    }
+    });
     return lines.join('\n');
 }

@@ -99,7 +99,6 @@ export function Footer() {
                     <BrandWordmark name="Gemini" />
                     <BrandWordmark name="Piper TTS" />
                     <BrandWordmark name="Supabase" />
-                    <BrandWordmark name="OpenRouter" />
                 </div>
 
                 {/* Divider */}

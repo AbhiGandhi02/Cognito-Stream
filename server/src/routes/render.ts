@@ -6,6 +6,17 @@ import { z } from 'zod';
 
 const router = Router();
 
+// ==========================================
+// OWNERSHIP
+// ==========================================
+//
+// Every route here previously looked rows up by id alone, while every other
+// router scoped to req.user.id. That let any authenticated user read progress
+// for, re-render, or retry scenes on someone else's storyboard.
+//
+// Missing and not-owned are both reported as 404 so the API never reveals that
+// a storyboard exists but belongs to someone else.
+
 /** Safely parse manimCode — handles both JSON arrays and raw Python strings */
 function safeParseManimCode(manimCode: string | null): any {
   if (!manimCode) return {};
@@ -41,8 +52,8 @@ router.post(
     console.log(`🎬 Starting final render for storyboard: ${id}`);
 
     // Get storyboard with all scenes
-    const storyboard = await prisma.storyboard.findUnique({
-      where: { id },
+    const storyboard = await prisma.storyboard.findFirst({
+      where: { id, userId: req.user!.id },
       include: {
         scenes: {
           orderBy: { sceneNumber: 'asc' },
@@ -174,8 +185,10 @@ router.post(
         const { generateAudio } = await import('../services/elevenlabs');
         const { triggerRenderer } = await import('../services/renderer');
 
-        const scene = await prisma.scene.findUnique({
-          where: { id: sceneId },
+        // Ownership is checked per scene, so one foreign id in the array
+        // cannot smuggle work onto another user's storyboard.
+        const scene = await prisma.scene.findFirst({
+          where: { id: sceneId, storyboard: { userId: req.user!.id } },
         });
 
         if (!scene) {
@@ -262,8 +275,8 @@ router.get(
   asyncHandler(async (req: Request, res: Response) => {
     const { storyboardId } = req.params;
 
-    const storyboard = await prisma.storyboard.findUnique({
-      where: { id: storyboardId },
+    const storyboard = await prisma.storyboard.findFirst({
+      where: { id: storyboardId, userId: req.user!.id },
       include: {
         scenes: {
           select: {
@@ -331,8 +344,8 @@ router.post(
     const { sceneId } = req.params;
     const { quality = 'medium' } = req.body;
 
-    const scene = await prisma.scene.findUnique({
-      where: { id: sceneId },
+    const scene = await prisma.scene.findFirst({
+      where: { id: sceneId, storyboard: { userId: req.user!.id } },
     });
 
     if (!scene) {

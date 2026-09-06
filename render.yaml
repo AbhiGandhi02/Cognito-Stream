@@ -31,9 +31,13 @@ services:
       - key: SUPABASE_JWT_SECRET
         sync: false
 
-      # Renderer service — Render's private network DNS uses the service name.
+      # Renderer base URL. Dashboard-managed on purpose: the renderer runs on
+      # a Hugging Face Docker Space, not on Render, so there is no private
+      # network hostname to hardcode here. A literal value would be re-applied
+      # on every blueprint sync and silently break rendering — the server's
+      # /health does not probe the renderer, so it would still report ok.
       - key: RENDERER_URL
-        value: http://cognito-stream-renderer:5000
+        sync: false
 
       # Public client URL for CORS allow-list. Vercel/Netlify URL of the SPA.
       - key: CLIENT_URL
@@ -53,53 +57,29 @@ services:
       - key: GEMINI_CODE_MODEL
         value: gemini-3.7-flash
 
-      # Parallel scene renders. Matched to the renderer's CPU count below
-      # (standard plan = 1 CPU); Manim is CPU-bound, so a higher value only
-      # timeshares one core and crowds 2GB of RAM. Raise this together with
-      # the renderer plan, not on its own.
+      # Parallel scene renders. Matched to the renderer's CPU count — the free
+      # HF Space is 2 vCPU. Manim is CPU-bound, so a higher value only
+      # timeshares the same cores and adds memory pressure. Raise this only
+      # alongside the Space's hardware tier, not on its own.
       - key: SCENE_CONCURRENCY
         value: "2"
 
   # -----------------------------------------------------------------
-  # Manim renderer — Docker, Python + FFmpeg + LaTeX + Piper TTS.
-  # Marked as private — only the API server reaches it on the internal net.
+  # Manim renderer — NOT deployed here.
   # -----------------------------------------------------------------
-  - type: pserv               # private service (internal-only)
-    name: cognito-stream-renderer
-    runtime: image
-    plan: standard            # $25/mo, 2GB RAM, 1 CPU. Manim needs the RAM.
-    region: oregon
-    image:
-      url: docker://docker.io/library/python:3.11-slim   # placeholder — see notes below
-    # NOTE: Render's "image" runtime expects a pre-built image in a registry.
-    # For Dockerfile builds, change `runtime: image` → `runtime: docker` and
-    # add `dockerfilePath: Dockerfile` + `rootDir: renderer` (Render docker
-    # builds are in beta; alternatively push your own image to Docker Hub
-    # / GHCR and reference it here).
-    autoDeploy: true
-    envVars:
-      - key: PORT
-        value: 5000
-      - key: OUTPUT_DIR
-        value: /app/output
-      - key: TEMP_DIR
-        value: /app/temp
-      - key: AUDIO_DIR
-        value: /app/audio
-      - key: DEFAULT_RENDER_QUALITY
-        value: medium
-
-      # Cloud storage — fill in via dashboard.
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: SUPABASE_STORAGE_BUCKET
-        value: cognito-stream
-
-    # Disk for the brief moments before files are uploaded to Supabase.
-    # Without this, /tmp / /app/output get wiped on container restart.
-    disk:
-      name: renderer-data
-      mountPath: /app
-      sizeGB: 5
+  # It runs as a Hugging Face Docker Space, built from renderer/Dockerfile:
+  #   https://huggingface.co/spaces/AbhiG0212/cognito-stream-renderer
+  #   -> https://abhig0212-cognito-stream-renderer.hf.space
+  #
+  # The Space is a separate git repo with renderer/'s contents at its root, so
+  # pushing this repo to GitHub does NOT update it. To ship renderer changes,
+  # sync that clone and push to the Space remote (see DEPLOYMENT.md Step 3).
+  #
+  # Its env vars (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+  # SUPABASE_STORAGE_BUCKET, OUTPUT_DIR, TEMP_DIR, AUDIO_DIR, PORT,
+  # DEFAULT_RENDER_QUALITY) live in the Space's Settings -> Variables and
+  # secrets, not in this file.
+  #
+  # A `pserv` block used to sit here describing a Render private service with a
+  # placeholder image. Nothing was ever deployed from it, and the internal
+  # hostname it implied is what made the old hardcoded RENDERER_URL look valid.

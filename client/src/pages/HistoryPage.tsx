@@ -7,9 +7,63 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, RefreshCcw, Search, Film, Clock, Pencil, Trash2, Check, X } from 'lucide-react';
+import { ArrowLeft, RefreshCcw, Search, Film, Clock, Pencil, Trash2, Check, X, Play } from 'lucide-react';
 import { api, type Storyboard } from '../services/api';
 import { resolveFinalVideoUrl } from '../data/demos';
+
+/**
+ * HistoryThumb — 16:9 preview tile for a row. Rests on the first decoded frame
+ * and loops a muted preview while the row is hovered, so the list reads as a
+ * shelf of videos rather than a stack of black rectangles.
+ */
+function HistoryThumb({ videoUrl }: { videoUrl: string | null }) {
+    const ref = useRef<HTMLVideoElement>(null);
+    const [ready, setReady] = useState(false);
+
+    const play = () => {
+        const v = ref.current;
+        if (!v) return;
+        void v.play().catch(() => { /* autoplay denied — still frame stays */ });
+    };
+    const reset = () => {
+        const v = ref.current;
+        if (!v) return;
+        v.pause();
+        try { v.currentTime = 0; } catch { /* readyState too low — ignore */ }
+    };
+
+    return (
+        <div
+            onMouseEnter={play}
+            onMouseLeave={reset}
+            className="shrink-0 relative w-[104px] aspect-video rounded-lg overflow-hidden border border-white/10 bg-navy-900 flex items-center justify-center transition-colors group-hover:border-white/25"
+        >
+            {videoUrl ? (
+                <>
+                    <video
+                        ref={ref}
+                        src={videoUrl}
+                        muted
+                        loop
+                        playsInline
+                        preload="metadata"
+                        aria-hidden="true"
+                        onLoadedData={() => setReady(true)}
+                        className={`w-full h-full object-cover transition-opacity duration-300 ${ready ? 'opacity-100' : 'opacity-0'}`}
+                    />
+                    <div className="pointer-events-none absolute inset-0 bg-linear-to-t from-black/40 to-transparent" />
+                    <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                        <span className="w-7 h-7 rounded-full bg-black/55 backdrop-blur-sm ring-1 ring-white/25 flex items-center justify-center opacity-90 group-hover:opacity-0 transition-opacity duration-200">
+                            <Play className="w-3 h-3 text-white ml-0.5" fill="currentColor" />
+                        </span>
+                    </span>
+                </>
+            ) : (
+                <Film className="w-4 h-4 text-slate-600" />
+            )}
+        </div>
+    );
+}
 
 function statusPill(status: string): { label: string; className: string } {
     switch (status) {
@@ -227,20 +281,7 @@ export function HistoryPage() {
                                     className="w-full group text-left rounded-xl border border-white/8 bg-white/3 backdrop-blur-md hover:border-white/20 hover:bg-white/5 transition-colors p-5 flex items-center gap-4 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
                                 >
                                     {/* Thumbnail */}
-                                    <div className="shrink-0 w-20 h-12 rounded-md overflow-hidden border border-white/8 bg-navy-900 flex items-center justify-center">
-                                        {resolveFinalVideoUrl(sb) ? (
-                                            <video
-                                                src={resolveFinalVideoUrl(sb)!}
-                                                muted
-                                                playsInline
-                                                preload="metadata"
-                                                aria-hidden="true"
-                                                className="w-full h-full object-cover"
-                                            />
-                                        ) : (
-                                            <Film className="w-4 h-4 text-slate-600" />
-                                        )}
-                                    </div>
+                                    <HistoryThumb videoUrl={resolveFinalVideoUrl(sb)} />
 
                                     {/* Body */}
                                     <div className="min-w-0 flex-1">

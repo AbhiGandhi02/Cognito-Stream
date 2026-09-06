@@ -2,12 +2,13 @@ import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { generateStoryboard } from '../services/gemini';
 import { generateAudio } from '../services/elevenlabs';
-import { triggerRenderer, assembleVideo } from '../services/renderer';
+import { triggerRenderer, assembleVideo, deleteStorageObjects } from '../services/renderer';
 import { processStoryboardScenes } from '../services/orchestrator';
 import { assembleStoryboard } from '../services/assembly';
 import { validateRequest } from '../middleware/validation';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { findDemoSource } from '../lib/demo';
+import { withVideoCost, assignVideoCost } from '../services/llmUsage';
 import { z } from 'zod';
 
 const router = Router();
@@ -46,8 +47,22 @@ async function processAllScenes(storyboardId: string): Promise<void> {
   }
 
   // After orchestration, assemble the final video from whatever completed.
-  // assembleStoryboard handles the all-scenes-failed case itself.
-  await assembleStoryboard(storyboardId);
+  // assembleStoryboard handles the all-scenes-failed case itself, and now also
+  // owns the terminal status — the orchestrator deliberately leaves the
+  // storyboard 'processing' so the UI can show the stitching stage.
+  //
+  // Guarded because of that ownership: if this threw, the storyboard would sit
+  // in 'processing' forever and the dashboard would poll it indefinitely.
+  try {
+    await assembleStoryboard(storyboardId);
+  } catch (assemblyError) {
+    const msg = assemblyError instanceof Error ? assemblyError.message : 'Unknown error';
+    console.error('❌ Assembly crashed:', msg);
+    await prisma.storyboard.update({
+      where: { id: storyboardId },
+      data: { status: 'failed', errorMessage: `Assembly failed: ${msg}`.slice(0, 2000) },
+    }).catch(() => { /* row may be gone */ });
+  }
 }
 
 // ==========================================
@@ -388,9 +403,14 @@ router.post(
 
     console.log(`📝 Generating storyboard for prompt: "${prompt.substring(0, 50)}..." (user ${userId})`);
 
+    // Brief + scene plan run before the row exists, so their cost has no id to
+    // attach to yet. One scope spans both the planning calls and the insert;
+    // assignVideoCost adopts it the moment the id is known, so the final
+    // per-video summary includes them rather than losing them.
+    const storyboard = await withVideoCost(null, async () => {
     const storyboardData = await generateStoryboard(prompt);
 
-    const storyboard = await prisma.$transaction(async (tx) => {
+    const created = await prisma.$transaction(async (tx) => {
       const newStoryboard = await tx.storyboard.create({
         data: {
           userId,
@@ -398,6 +418,11 @@ router.post(
           description: storyboardData.description,
           prompt,
           status: 'draft',
+          // Persist the brief. It decides the worked example every scene is
+          // built around, and was previously thrown away after planning — so a
+          // scene retried an hour later had to infer that example from its own
+          // description and whatever could be scraped out of sibling scenes.
+          brief: storyboardData.brief ? JSON.stringify(storyboardData.brief) : null,
           scenes: {
             create: storyboardData.scenes.map((scene, index) => ({
               sceneNumber: index + 1,
@@ -428,6 +453,10 @@ router.post(
       });
     });
 
+      assignVideoCost(created.id);
+      return created;
+    });
+
     // Parse scenes for response
     const responseData = {
       ...storyboard,
@@ -448,6 +477,19 @@ router.post(
       });
     } else {
       console.log('📝 Storyboard created in draft mode (no auto-render).');
+      // Narration is NOT started here.
+      //
+      // It used to be, to hide TTS latency behind the user reading the
+      // storyboard. But narration is now uploaded to the bucket, and objects
+      // are only ever removed when a storyboard is deleted or pruned after a
+      // complete render — so every abandoned draft left its scene audio in
+      // storage permanently, with no cleanup path. A user who creates five
+      // drafts and renders one leaks four storyboards' worth.
+      //
+      // /api/scene/:id/generate-code calls ensureSceneAudio before deriving its
+      // timing budget, so the measured-audio guarantee is unaffected; the only
+      // loss is the latency hiding, roughly 2s per scene added to a code-gen
+      // loop that already spends 5-10s per scene on Gemini.
     }
 
     return res.status(201).json(responseData);
@@ -685,12 +727,29 @@ router.delete(
     const { id } = req.params;
     const userId = req.user!.id;
 
-    const existing = await prisma.storyboard.findFirst({ where: { id, userId } });
+    const existing = await prisma.storyboard.findFirst({
+      where: { id, userId },
+      include: {
+        scenes: { select: { videoUrl: true, audioUrl: true, thumbnailUrl: true } },
+      },
+    });
     if (!existing) {
       return res.status(404).json({ error: 'Not Found', message: 'Storyboard not found' });
     }
 
+    // Collect the storage objects BEFORE the rows cascade away — afterwards
+    // nothing records where they live and they are orphaned permanently.
+    const objectUrls = [
+      existing.finalVideoUrl,
+      ...existing.scenes.flatMap((sc) => [sc.videoUrl, sc.audioUrl, sc.thumbnailUrl]),
+    ];
+
     await prisma.storyboard.delete({ where: { id } });
+
+    // After the delete, and not awaited: the user's storyboard is already gone
+    // as far as they are concerned, and a renderer outage must not make the
+    // delete appear to fail.
+    void deleteStorageObjects(objectUrls);
 
     return res.json({
       success: true,

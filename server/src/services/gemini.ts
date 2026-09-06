@@ -3,7 +3,9 @@ import {
   SchemaType,
   type ResponseSchema,
 } from '@google/generative-ai';
-import { recordUsage } from './llmUsage';
+import { recordUsage, type UsageStage } from './llmUsage';
+import { getCachedSystemPrompt, invalidateCachedSystemPrompt } from './geminiCache';
+import { acquireLLMSlot } from './llmRateLimit';
 import {
   MANIM_CODE_SYSTEM_PROMPT,
   CODE_CORRECTION_SYSTEM_PROMPT,
@@ -30,6 +32,8 @@ interface StoryboardResponse {
   title: string;
   description: string;
   scenes: StoryboardScene[];
+  /** The brief this plan was built from, for persistence. Null if expansion failed. */
+  brief: VideoBrief | null;
 }
 
 // ==========================================
@@ -106,6 +110,8 @@ interface LLMCallOptions {
   responseSchema?: ResponseSchema;
   // Pin the call to one key tier instead of walking the failover order.
   forceTier?: GeminiKeyTier;
+  // Which pipeline stage this call belongs to, for the per-video cost split.
+  stage?: UsageStage;
 }
 
 // Per-key cooldown. Each key has independent state — a free-tier 429 must not
@@ -274,23 +280,68 @@ async function callGemini(
   if (!client) {
     throw new Error(`${envNameFor(tier)} not configured`);
   }
+
+  // Pace against ApiRequestsPerMinutePerProjectPerRegion before issuing
+  // anything. A 429 here would be read as a quota error by the failover logic
+  // and cool this key down, so the cheap wait is strictly better than the
+  // burst it prevents.
+  await acquireLLMSlot(tier);
   const modelName =
     opts.geminiModel || textModelName();
-  const model = client.getGenerativeModel({
-    model: modelName,
-    systemInstruction: opts.systemPrompt,
-    generationConfig: {
-      temperature: opts.temperature ?? 0.5,
-      maxOutputTokens: opts.maxTokens ?? 4096,
-      ...(opts.responseMimeType
-        ? { responseMimeType: opts.responseMimeType }
-        : {}),
-      ...(opts.responseSchema ? { responseSchema: opts.responseSchema } : {}),
-    },
-  });
-  const result = await model.generateContent(opts.userPrompt);
-  recordUsage(modelName, tier, result.response.usageMetadata);
-  return result.response.text() || '';
+  const generationConfig = {
+    temperature: opts.temperature ?? 0.5,
+    maxOutputTokens: opts.maxTokens ?? 4096,
+    ...(opts.responseMimeType
+      ? { responseMimeType: opts.responseMimeType }
+      : {}),
+    ...(opts.responseSchema ? { responseSchema: opts.responseSchema } : {}),
+  };
+
+  // Reference the system prompt from a server-side cache when one exists, so
+  // the ~6.4k tokens we resend on every scene bill at the cached rate instead
+  // of full rate. Null means caching is off or unavailable — then we send it
+  // inline exactly as before. Both paths produce identical output.
+  //
+  // Only worth it for the big code-generation prompt; getCachedSystemPrompt
+  // declines anything short, so the brief and planning calls skip it.
+  const apiKey = GEMINI_KEYS[tier];
+  const cached = opts.systemPrompt
+    ? await getCachedSystemPrompt(apiKey, modelName, opts.systemPrompt)
+    : null;
+
+  const model = cached
+    ? client.getGenerativeModelFromCachedContent(cached, { generationConfig })
+    : client.getGenerativeModel({
+        model: modelName,
+        systemInstruction: opts.systemPrompt,
+        generationConfig,
+      });
+
+  try {
+    const result = await model.generateContent(opts.userPrompt);
+    recordUsage(modelName, tier, result.response.usageMetadata, opts.stage ?? 'other');
+    return result.response.text() || '';
+  } catch (err) {
+    // A cache can expire or be deleted between our TTL bookkeeping and the
+    // call. Drop the stale handle and retry inline once, so a lapsed cache
+    // degrades to a slightly pricier call rather than a failed scene.
+    if (cached) {
+      invalidateCachedSystemPrompt(apiKey, modelName, opts.systemPrompt!);
+      console.warn(
+        `[Gemini cache] call failed with a cached handle ` +
+        `(${String((err as Error)?.message ?? err).slice(0, 140)}) — retrying inline.`
+      );
+      const fallback = client.getGenerativeModel({
+        model: modelName,
+        systemInstruction: opts.systemPrompt,
+        generationConfig,
+      });
+      const result = await fallback.generateContent(opts.userPrompt);
+      recordUsage(modelName, tier, result.response.usageMetadata, opts.stage ?? 'other');
+      return result.response.text() || '';
+    }
+    throw err;
+  }
 }
 
 /**
@@ -448,13 +499,34 @@ export async function pingLLMs(): Promise<Record<GeminiKeyTier, GeminiKeyHealth>
 // PROMPT EXPANSION (brief)
 // ==========================================
 
+/**
+ * One scene's worth of plan. Previously a bare string — a topic label like
+ * "Show the first pass" — which left the planner to invent every visual
+ * specific per scene, independently. Naming what is on screen and what changes
+ * puts the continuity decisions in the plan, where they are made once, instead
+ * of leaving sceneContext.ts to reverse-engineer them out of generated Python.
+ */
+export interface OutlineBeat {
+  covers: string;
+  onScreen: string;
+  changesFromPrevious: string;
+  keyMoment: string;
+}
+
 export interface VideoBrief {
   title: string;
   summary: string;
   workedExample: string;
   exampleData: string;
   keyTerms: string[];
-  outline: string[];
+  outline: OutlineBeat[];
+  /**
+   * What the video leaves out. The only signal anywhere that a broad prompt was
+   * narrowed: nothing else in the pipeline can tell whether "Explain sorting"
+   * became a complete lesson or one algorithm out of five, because the plan is
+   * generated and then simply followed.
+   */
+  scopeNote: string;
 }
 
 const VIDEO_BRIEF_SCHEMA: ResponseSchema = {
@@ -472,28 +544,73 @@ const VIDEO_BRIEF_SCHEMA: ResponseSchema = {
       type: SchemaType.STRING,
       description:
         'The single concrete example carried through the whole video, in words. ' +
-        'e.g. "bubble-sorting a five-element array of small integers".',
+        'Match the subject: "a 2 kg block pushed with 6 N across a surface with ' +
+        'mu = 0.3", "finding the slope of f(x) = x^2 - 4 at x = 2", or ' +
+        '"inserting 8, 3, 10, 1, 6 into a binary search tree".',
     },
     example_data: {
       type: SchemaType.STRING,
       description:
-        'The literal data that example uses, exactly as it should appear on screen. ' +
-        'e.g. "[5, 2, 8, 1, 9]" or "f(x) = x^2 on the interval [-2, 2]". ' +
-        'Must be concrete values, never a placeholder.',
+        'The literal values that example uses, exactly as they should appear on ' +
+        'screen, with units where the subject has them. Never a placeholder. ' +
+        'e.g. "f(x) = x^2 - 4 on [-3, 3]", "m = 2 kg, F = 6 N, mu = 0.3", ' +
+        '"the array [7, 2, 9, 4, 1]", "a 0.5 m pendulum released from 15 degrees".',
     },
     key_terms: {
       type: SchemaType.ARRAY,
       items: { type: SchemaType.STRING },
       description: 'Terms and notation to use consistently, 3-6 items.',
     },
+    scope_note: {
+      type: SchemaType.STRING,
+      description:
+        'What this video covers and, explicitly, what it does NOT — one ' +
+        'sentence. Broad requests must be NARROWED to one idea rather than ' +
+        'compressed, and this is the record of that choice. ' +
+        'e.g. "Covers bubble sort only; insertion, merge and quicksort are out ' +
+        'of scope." Say "Covers the topic in full." only when nothing was left out.',
+    },
     outline: {
       type: SchemaType.ARRAY,
-      items: { type: SchemaType.STRING },
-      description: 'What to cover, in teaching order, 4-6 steps.',
+      description:
+        'The video as a beat sheet, in teaching order, 4-12 beats. One beat per ' +
+        'scene, so size the list to the topic: 4-5 for a single narrow idea, ' +
+        '8-12 for a mechanism with several distinct stages. Every beat is a ' +
+        'separate animation to render, so use only as many as the topic needs.',
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          covers: {
+            type: SchemaType.STRING,
+            description: 'The one idea this beat teaches.',
+          },
+          on_screen: {
+            type: SchemaType.STRING,
+            description:
+              'What is visible during this beat, naming the literal values from ' +
+              'example_data. e.g. "the row [7, 2, 9, 4, 1] as five boxes, the ' +
+              'compared pair outlined yellow".',
+          },
+          changes_from_previous: {
+            type: SchemaType.STRING,
+            description:
+              'What is added, removed, moved or recoloured relative to the beat ' +
+              'before it. For the first beat, what appears from nothing. This is ' +
+              'what makes consecutive scenes look continuous rather than like ' +
+              'unrelated slides.',
+          },
+          key_moment: {
+            type: SchemaType.STRING,
+            description: 'The single thing the viewer must notice in this beat.',
+          },
+        },
+        required: ['covers', 'on_screen', 'changes_from_previous', 'key_moment'],
+      },
     },
   },
   required: [
     'title', 'summary', 'worked_example', 'example_data', 'key_terms', 'outline',
+    'scope_note',
   ],
 };
 
@@ -545,21 +662,68 @@ export async function expandPrompt(userPrompt: string): Promise<VideoBrief | nul
 You are planning an animated educational video from a short user request.
 Expand it into a brief the animators can work from without guessing.
 
-The most important field is example_data. Pick ONE concrete worked example and
-commit to its literal values — the exact array, equation, or numbers that will
-appear on screen. Every scene of the video will animate this same example, so
-it must be specific enough to draw and small enough to fit a screen (an array
-of about 5 elements, numbers under 100, an equation of a few terms).
+The topic may be mathematics, physics, computer science / DSA, or any other
+technical subject. Whatever it is, the video teaches the idea by working ONE
+concrete example end to end — so your job here is to choose that example and
+commit to its literal values.
 
-Choose an example that makes the idea obvious, not one that merely exercises
-it: for a sort, an array whose disorder is visible at a glance.
+The most important field is example_data: the exact values that appear on
+screen. Not a description of them, not a placeholder — the literal figures,
+symbols and units, written the way the animator should draw them. Every scene
+animates this same example, so it must be:
+  * CONCRETE — actual numbers, a specific equation, a named scenario. Never
+    "an array of integers", "a function", or "a moving object": choose the
+    array, the function, the object.
+  * DRAWABLE — it fits one screen and reads at a glance. Small collections
+    (about 4-6 elements), few terms, small integers or one-decimal values, at
+    most two or three interacting bodies.
+  * SELF-CONTAINED — every quantity the explanation needs is stated, with
+    units wherever the subject has them.
+  * WORTH WATCHING — it has intermediate steps or states, since the point of
+    animating it is to show the work rather than only the answer.
 
-Pick FRESH values. Do not reach for the textbook default or a set of numbers
-you have produced before — vary the actual figures, and where the topic allows
+What example_data looks like by subject:
+  * Mathematics — the equation, function or object with literal coefficients,
+    plus the domain or values in play: "f(x) = x^2 - 4 on [-3, 3]", "the
+    system 2x + y = 5 and x - y = 1", "the triangle with sides 6, 8, 10".
+  * Physics — the scenario with every quantity and its unit: "a 2 kg block
+    pushed with 6 N across a surface with mu = 0.3", "a 0.5 m pendulum
+    released from 15 degrees", "a wave of 2 m wavelength at 3 Hz".
+  * DSA / algorithms — the literal input structure and its contents: "the
+    array [7, 2, 9, 4, 1]", "a BST built by inserting 8, 3, 10, 1, 6", "the
+    string ABRACADABRA", "a 5-node graph with edges A-B, A-C, B-D, C-D, D-E".
+  * Anything else — the same rule: name the specific case and spell it out.
+
+Choose the example that makes the idea OBVIOUS, not merely one the idea
+applies to. A sort wants an array whose disorder is visible at a glance; a
+derivative wants a curve whose slope visibly changes; a force problem wants
+numbers that resolve to a clean, interpretable answer. Where the subject has a
+standard convention — axis orientation, notation, SI units — follow it, since
+every scene will inherit it.
+
+Pick FRESH values. Do not reach for the textbook default or a set of figures
+you have produced before — vary the actual numbers, and where the topic allows
 it, vary the framing too (a different quantity being measured, a different
 concrete scenario). Two videos on the same topic should not animate the same
-numbers. The example must still be the clearest one for the idea; vary the
-values, not the quality.
+example. It must still be the clearest case for the idea; vary the values, not
+the quality.
+
+If the request is broader than one video can teach — "explain sorting" is a
+syllabus, not a video — NARROW it to a single idea and say so in scope_note.
+Do not try to cover everything by compressing: every scene still gets 30-70
+words of narration, so compression can only drop material silently, leaving a
+video that claims more than it delivers. A sharp video about one algorithm beats
+a shallow tour of five.
+
+Then break the video into BEATS — one per scene, in teaching order. A beat is
+not a topic label: it says what is on screen (using the literal values above),
+what changes relative to the beat before it, and the one thing the viewer must
+notice. Those three are what make consecutive scenes look like one continuous
+explanation instead of unrelated slides, and each scene is animated
+independently, so anything you leave out gets invented separately per scene.
+
+Carry the example forward across beats. If an earlier beat transformed the data,
+later beats continue from THAT state — do not silently reset it.
 
 CONSTRAINT FOR THIS REQUEST: ${pickVariation()}
 Satisfy it if the topic allows; ignore it silently if it does not apply. It
@@ -585,6 +749,7 @@ User request: "${userPrompt}"
       // gets an identical video. Code generation stays cold — there,
       // creativity means invented APIs.
       temperature: 0.9,
+      stage: 'brief',
       // The brief itself is small (~300 tokens), but THINKING tokens count
       // against this budget too. At 1024 a topic the model reasoned about —
       // the Pythagorean theorem burned 920 on thinking — left too few tokens
@@ -602,7 +767,21 @@ User request: "${userPrompt}"
       workedExample: String(raw.worked_example || '').trim(),
       exampleData: String(raw.example_data || '').trim(),
       keyTerms: Array.isArray(raw.key_terms) ? raw.key_terms.map(String) : [],
-      outline: Array.isArray(raw.outline) ? raw.outline.map(String) : [],
+      scopeNote: String(raw.scope_note || '').trim(),
+      // Tolerates the old shape (an array of strings) so a model that ignores
+      // the object schema degrades to labels rather than throwing.
+      outline: Array.isArray(raw.outline)
+        ? raw.outline.map((b: any): OutlineBeat =>
+            typeof b === 'string'
+              ? { covers: b, onScreen: '', changesFromPrevious: '', keyMoment: '' }
+              : {
+                  covers: String(b?.covers ?? '').trim(),
+                  onScreen: String(b?.on_screen ?? '').trim(),
+                  changesFromPrevious: String(b?.changes_from_previous ?? '').trim(),
+                  keyMoment: String(b?.key_moment ?? '').trim(),
+                }
+          ).filter((b: OutlineBeat) => b.covers)
+        : [],
     };
 
     // A brief without concrete data is worse than none — it would add tokens
@@ -616,6 +795,7 @@ User request: "${userPrompt}"
     }
 
     console.log(`📋 Brief: "${brief.title}" — example ${brief.exampleData}`);
+    if (brief.scopeNote) console.log(`   ↳ scope: ${brief.scopeNote}`);
     return brief;
   } catch (error) {
     lastError = error;
@@ -637,6 +817,34 @@ User request: "${userPrompt}"
   return null;
 }
 
+/**
+ * Rebuild the compact brief context for a single scene's code generation from
+ * the JSON stored on the storyboard.
+ *
+ * Deliberately NOT the full brief: the beat sheet describes every scene, and
+ * the one being generated already has its own description. What is worth
+ * re-stating is the video-level agreement — the example values, the notation,
+ * and the scope — which is what drifts when a scene is regenerated alone.
+ *
+ * Returns '' for a missing or unparseable value, so a storyboard created before
+ * the brief column existed behaves exactly as it did before.
+ */
+export function briefContextFromJson(stored: string | null | undefined): string {
+  if (!stored) return '';
+  try {
+    const b = JSON.parse(stored) as Partial<VideoBrief>;
+    const lines: string[] = [];
+    if (b.title) lines.push(`Video: ${b.title}`);
+    if (b.workedExample) lines.push(`Worked example: ${b.workedExample}`);
+    if (b.exampleData) lines.push(`EXAMPLE DATA (use these exact values): ${b.exampleData}`);
+    if (b.keyTerms?.length) lines.push(`Key terms and notation: ${b.keyTerms.join(', ')}`);
+    if (b.scopeNote) lines.push(`Scope: ${b.scopeNote}`);
+    return lines.join('\n');
+  } catch {
+    return '';
+  }
+}
+
 /** Render the brief as the block prepended to the planning prompt. */
 export function formatBrief(brief: VideoBrief): string {
   const lines = [
@@ -645,12 +853,20 @@ export function formatBrief(brief: VideoBrief): string {
     `Worked example: ${brief.workedExample}`,
     `EXAMPLE DATA (use these exact values): ${brief.exampleData}`,
   ];
+  if (brief.scopeNote) {
+    lines.push(`Scope (do not exceed): ${brief.scopeNote}`);
+  }
   if (brief.keyTerms.length) {
     lines.push(`Key terms and notation: ${brief.keyTerms.join(', ')}`);
   }
   if (brief.outline.length) {
-    lines.push('Cover, in this order:');
-    brief.outline.forEach((step, i) => lines.push(`  ${i + 1}. ${step}`));
+    lines.push(`Beat sheet — one scene per beat, in this order (${brief.outline.length} scenes):`);
+    brief.outline.forEach((b, i) => {
+      lines.push(`  ${i + 1}. ${b.covers}`);
+      if (b.onScreen) lines.push(`       on screen: ${b.onScreen}`);
+      if (b.changesFromPrevious) lines.push(`       changes:   ${b.changesFromPrevious}`);
+      if (b.keyMoment) lines.push(`       notice:    ${b.keyMoment}`);
+    });
   }
   return lines.join('\n');
 }
@@ -710,32 +926,80 @@ export async function generateStoryboard(
   // says nothing about JSON, keys, or markdown fences — the model cannot
   // return anything else. It only has to get the teaching right.
   const promptForStoryboard = `
-You are an expert instructional designer and scriptwriter.
-Take the user's idea and turn it into a step-by-step explanatory script,
-broken into logical scenes that build understanding in order.
+You are an expert instructional designer and scriptwriter for animated
+explainer videos. Take the user's idea and turn it into a step-by-step
+explanatory script, broken into scenes that build understanding in order.
 ${brief ? `
 === BRIEF (already decided — follow it) ===
 ${formatBrief(brief)}
 === END BRIEF ===
 ` : ''}
+HOW MANY SCENES:
+${brief ? `The brief's beat sheet IS the scene list: one scene per beat, in that order,
+same count. The structure is already decided — do not re-derive it. Split a beat
+into two scenes only when its narration would run past 70 words, and merge two
+only when together they are a single beat.` : `Break the idea into 4 to 12 scenes, in teaching order — 4 or 5 for a single
+narrow idea, 8 to 12 for a mechanism with several distinct stages.`}
+Never exceed 12 scenes. Each scene is rendered as its own animation, so an
+extra scene is real time and cost — add one only when it earns its place. But
+do not compress a broad topic into too few scenes either: dropping content is
+worse than a longer video, so if the topic needs the steps, take them.
+
+SHAPE OF THE VIDEO:
+- Scene 1 introduces the concrete example and the question the video answers.
+- Each middle scene advances exactly one step of the explanation.
+- The final scene resolves it: the result, and what the viewer takes away.
+- No two scenes may show the same thing. If a scene would restate the one
+  before it, cut it.
 
 For each scene:
+
 - scene_title: a short name for what this scene covers.
+
 - narration: what the narrator says — 30 to 70 words. Each scene's animation
   is built to fit its narration, so this length directly sets how long the
   scene runs on screen. Under 30 words is too thin to animate; over 70 makes
   one scene drag and should be split into two.
-- visual_description: what the viewer sees animated.
+  This text is read aloud by a speech engine exactly as written, so write
+  speakable prose: full sentences, no bullet points, no markdown, no
+  parenthetical asides. Spell out every symbol, formula and unit the way a
+  narrator would say it — "a squared plus b squared equals c squared", "two
+  point five metres per second", "f of x" — never "a^2 + b^2 = c^2" or
+  "2.5 m/s". Name the quantity, not just the number.
 
-${brief ? `Use the EXAMPLE DATA above in every scene that shows the example — the same
+- visual_description: what the viewer sees animated. This string is the ONLY
+  instruction the animator gets for this scene — it is turned into animation
+  code with no other context — so make it concrete and complete:
+  * Name the objects on screen and their literal values.
+  * Say how they are arranged (a row of boxes, a pair of axes, side by side,
+    labelled with which label).
+  * Say what moves or changes during the scene, and in what order, since the
+    narration is spoken over that motion.
+  * Say which elements carry over from the previous scene and must be re-drawn
+    identically, and which are new here.
+  Keep it drawable as 2D vector animation: shapes, text, arrows, graphs,
+  labelled diagrams. Do not ask for photographs, real footage, paragraphs of
+  on-screen text, or more than a handful of moving parts at once.
+
+${brief ? `For each scene, build its visual_description from that beat's "on screen" and
+"changes" lines — expand them into full instructions, keeping every literal
+value, rather than inventing a different picture. Lead with what carries over
+from the previous scene and what is new here, since that is what the animator
+needs first. Fold the beat's "notice" line into the narration so the words and
+the motion land together.
+
+Use the EXAMPLE DATA above in every scene that shows the example — the same
 values, in the same order, every time. Write those literal values into the
 visual_description of each such scene (e.g. "the array ${brief.exampleData}"),
 because each scene's animation is generated independently and the visual
 description is what tells it which data to draw. Never substitute a different
-example partway through.` : `Introduce one concrete worked example early and carry it through every scene
+example partway through. Use the brief's key terms and notation exactly as
+written there, and keep them identical in every scene.` : `Introduce one concrete worked example early and carry it through every scene
 that needs one, rather than a fresh example each time — the viewer watches
 these back-to-back as a single video. Name its literal values in each scene's
-visual_description, since scenes are animated independently.`}
+visual_description, since scenes are animated independently. Fix your notation
+and variable names in the first scene that needs them, then keep them
+identical throughout.`}
 
 User Idea: "${prompt}"
   `;
@@ -748,6 +1012,7 @@ User Idea: "${prompt}"
 
       const responseText = (await callLLMText({
         userPrompt: promptForStoryboard,
+        stage: 'plan',
         temperature: 0.5,
         maxTokens: 4096,
         responseMimeType: 'application/json',
@@ -793,6 +1058,7 @@ User Idea: "${prompt}"
 
       // Map SculptAI scene format to Cognito-Stream format
       const storyboard: StoryboardResponse = {
+        brief,
         // The brief gives a real title and a readable summary. Without one we
         // fall back to the old behaviour: the prompt itself, and filler.
         title: brief?.title || prompt.substring(0, 80),
@@ -1006,6 +1272,7 @@ export async function generateManimSceneCode(
         // The model stops when it is done, so a high cap costs nothing extra.
         maxTokens: 32768,
         geminiModel: codeModelName(),
+        stage: 'code',
       });
 
       if (!code || code.trim().length === 0) {
@@ -1087,6 +1354,7 @@ export async function correctManimCode(
     // need of one.
     maxTokens: 32768,
     geminiModel: codeModelName(),
+    stage: 'repair',
   });
 
   if (!code || code.trim().length === 0) {

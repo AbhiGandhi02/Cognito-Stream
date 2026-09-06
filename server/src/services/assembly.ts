@@ -10,7 +10,8 @@
  */
 
 import { prisma } from '../lib/prisma';
-import { assembleVideo, deleteFinalVideo } from './renderer';
+import { assembleVideo, deleteFinalVideo, deleteStorageObjects } from './renderer';
+import { logVideoCost } from './llmUsage';
 
 export interface AssemblyOutcome {
   /** 'incomplete' = the renderer found fewer scene files than the DB expects. */
@@ -57,6 +58,8 @@ export async function assembleStoryboard(
         errorMessage: `All ${total} scene(s) failed to render. See per-scene errors for details.`,
       },
     });
+    // A total failure still spent real money on planning and code generation.
+    logVideoCost(storyboardId, { title: `${storyboard.title || storyboardId} (FAILED)`, scenes: 0 });
     return { status: 'failed', error: 'no completed scenes' };
   }
 
@@ -71,7 +74,7 @@ export async function assembleStoryboard(
         duration: s.actualDuration || s.estimatedDuration,
         sceneNumber: s.sceneNumber,
       })),
-      'medium',
+      undefined,   // use the configured RENDER_QUALITY, not a hardcoded tier
       storyboard.title || ''
     );
 
@@ -116,13 +119,30 @@ export async function assembleStoryboard(
     });
 
     console.log(`🎉 Final video ready (${assembled} scenes): ${assemblyResult.videoUrl}`);
-    return {
+
+    // The only moment this video's LLM spend is actually complete: the brief,
+    // the scene plan, every code-generation request and every repair have all
+    // landed. Prints once, then stops tracking the storyboard.
+    logVideoCost(storyboardId, {
+      title: storyboard.title || storyboardId,
+      scenes: assembled,
+      durationSec: assemblyResult.totalDuration ?? null,
+    });
+
+    const outcome: AssemblyOutcome = {
       status: 'completed',
       videoUrl: assemblyResult.videoUrl,
       totalDuration: assemblyResult.totalDuration,
       sceneCount: assembled,
       expectedSceneCount: completedScenes.length,
     };
+
+    // Ordered deliberately: the storyboard row above already points at the new
+    // video, so if anything here dies the worst case is intermediates left on
+    // disk — never a storyboard whose video was deleted out from under it.
+    await pruneSceneArtifacts(storyboardId, outcome);
+
+    return outcome;
   } catch (assemblyError) {
     const msg = assemblyError instanceof Error ? assemblyError.message : 'Unknown error';
     console.error('❌ Final video assembly failed:', msg);
@@ -134,6 +154,93 @@ export async function assembleStoryboard(
       },
     });
     return { status: 'failed', error: msg };
+  }
+}
+
+/**
+ * Drop the per-scene intermediates once the finished video no longer needs
+ * them.
+ *
+ * The durable artifact for a scene is its `manimCode` row, not its mp4 — a
+ * scene can always be re-rendered from the code, and re-clicking "Render Final
+ * Video" already re-renders every scene. So once a complete video exists, the
+ * per-scene videos and narration are disposable, and keeping them roughly
+ * doubles storage per video (~6 MB vs ~3 MB).
+ *
+ * They are kept while ANY scene is failed, because that is exactly when a
+ * retry will rebuild the final cut from the scenes that already succeeded, and
+ * re-rendering those would be pure waste.
+ *
+ * Every guard below exists to make sure this can only ever delete something
+ * that is genuinely redundant. Best-effort throughout: pruning must never turn
+ * a finished video into a failure.
+ */
+async function pruneSceneArtifacts(
+  storyboardId: string,
+  outcome: AssemblyOutcome
+): Promise<void> {
+  try {
+    // G1 — only after an assembly that actually produced a video.
+    if (outcome.status !== 'completed' || !outcome.videoUrl) return;
+
+    // G2 — the final video must be in durable storage. A relative path means
+    // cloud storage is unconfigured (local dev), where the per-scene files on
+    // disk are the ONLY copies and deleting them buys nothing.
+    if (!/^https?:\/\//.test(outcome.videoUrl)) return;
+
+    // G3 — the renderer must have stitched every scene it was given. A short
+    // count means files were missing, which is the opposite of safe to prune.
+    if (
+      outcome.sceneCount === undefined ||
+      outcome.expectedSceneCount === undefined ||
+      outcome.sceneCount < outcome.expectedSceneCount
+    ) {
+      return;
+    }
+
+    const scenes = await prisma.scene.findMany({
+      where: { storyboardId },
+      select: { sceneNumber: true, status: true, videoUrl: true, audioUrl: true },
+    });
+
+    // G4 — every scene in the storyboard must be complete. One failed scene
+    // means a retry is coming, and that retry needs its siblings' files.
+    const unfinished = scenes.filter((sc) => sc.status !== 'completed');
+    if (unfinished.length > 0) {
+      console.log(
+        `🧷 Keeping per-scene files for ${storyboardId} — ` +
+        `${unfinished.length} scene(s) not complete (${unfinished.map((s) => s.sceneNumber).join(', ')}).`
+      );
+      return;
+    }
+
+    // G5 — the video we just published must cover every scene that exists,
+    // not merely every scene the renderer happened to receive.
+    if (outcome.sceneCount < scenes.length) return;
+
+    // G6 — thumbnails are deliberately NOT pruned. They are ~10 KB each and
+    // the dashboard's scene breakdown and the landing page posters read them;
+    // deleting those would break UI that the scene videos never fed.
+    const urls = scenes.flatMap((sc) => [sc.videoUrl, sc.audioUrl]);
+    if (urls.every((u) => !u)) return;
+
+    console.log(
+      `🧹 Video complete with all ${scenes.length} scenes — removing per-scene ` +
+      `videos and narration (final video and thumbnails are kept).`
+    );
+    await deleteStorageObjects(urls);
+
+    // The DB columns are left pointing at the removed objects ON PURPOSE.
+    // assembleStoryboard selects scenes with `videoUrl: { not: null }`, so
+    // nulling them would make a later rebuild find zero scenes and mark a
+    // perfectly good storyboard failed. Nothing reads these URLs once the
+    // final video exists — the dashboard uses thumbnailUrl — and a re-render
+    // overwrites them with fresh ones.
+  } catch (err) {
+    console.warn(
+      `⚠️  Per-scene cleanup skipped for ${storyboardId} ` +
+      `(${String((err as Error)?.message ?? err).slice(0, 160)}) — the video is unaffected.`
+    );
   }
 }
 

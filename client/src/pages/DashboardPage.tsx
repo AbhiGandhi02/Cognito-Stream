@@ -10,6 +10,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 const SceneCodeViewer = lazy(() => import('../components/SceneCodeViewer'));
 import { api, type Storyboard, type Scene } from '../services/api';
 import { VideoPlayer } from '../components/VideoPlayer';
+import { GenerationTheater } from '../components/GenerationTheater';
 import { CommandPalette } from '../components/CommandPalette';
 import { ThemeToggle } from '../components/ThemeToggle';
 import { useMe } from '../hooks/useMe';
@@ -30,8 +31,6 @@ import {
     PanelLeft,
     LogOut,
     LayoutGrid,
-    Clock,
-    Info,
     Trash2,
     Pencil,
     Check,
@@ -890,26 +889,15 @@ export function DashboardPage() {
                             </div>
                         )}
 
-                        {/* Estimate banner — shows from the moment Generate
-                            Code is clicked. Continues through render in the
-                            processing view below. */}
+                        {/* Generation Theater — same staged card the render
+                            step uses, so the code-gen step isn't a bare
+                            spinner. Continues in the processing view below. */}
                         {generatingAll && (
-                            <div className="glass-card rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center gap-3">
-                                <div className="flex items-center gap-2 shrink-0">
-                                    <Clock className="w-4 h-4 text-slate-300" />
-                                    <span className="text-sm font-medium text-slate-100">
-                                        Estimated time: 3–6 minutes
-                                    </span>
-                                </div>
-                                <span className="text-xs text-slate-500 sm:border-l sm:border-white/10 sm:pl-3">
-                                    You can leave this tab open — generation continues even if you switch away.
-                                </span>
-                                {generateProgress.total > 0 && (
-                                    <span className="text-[11px] text-slate-500 sm:ml-auto font-mono">
-                                        {generateProgress.done} / {generateProgress.total}
-                                    </span>
-                                )}
-                            </div>
+                            <GenerationTheater
+                                phase="code"
+                                done={generateProgress.done}
+                                total={generateProgress.total || totalScenes}
+                            />
                         )}
 
                         {/* Scene list — each row toggles open to reveal the
@@ -1122,139 +1110,14 @@ export function DashboardPage() {
                         </div>
 
                         {/* Generation Theater — staged progress while processing */}
-                        {storyboard.status === 'processing' && !storyboard.finalVideoUrl && (() => {
-                            // Pick the current stage based on what we know about the
-                            // storyboard. The pipeline runs serially per scene:
-                            //   draft → code-gen → render → tts → assemble.
-                            // We don't get sub-scene events from the orchestrator yet,
-                            // so we infer stage from completedScenes vs totalScenes.
-                            const stages = [
-                                { id: 'draft', label: 'Storyboard drafted', icon: '📋' },
-                                { id: 'code', label: 'Writing animation code', icon: '⌨️' },
-                                { id: 'render', label: 'Rendering frames', icon: '🎬' },
-                                { id: 'voice', label: 'Generating narration', icon: '🎙️' },
-                                { id: 'assemble', label: 'Stitching final video', icon: '🪡' },
-                            ];
-                            const isAssembling = progress >= 100;
-                            const activeStageIdx = isAssembling ? 4 : completedScenes < totalScenes ? 2 : 4;
-                            return (
-                                <div className="glass-card rounded-2xl p-5 space-y-5">
-                                    {/* Estimate banner */}
-                                    <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 rounded-xl border border-white/10 bg-white/3 px-4 py-3">
-                                        <div className="flex items-center gap-2 shrink-0">
-                                            <Clock className="w-4 h-4 text-slate-300" />
-                                            <span className="text-sm font-medium text-slate-100">
-                                                Estimated time: 3–6 minutes
-                                            </span>
-                                        </div>
-                                        <span className="text-xs text-slate-500 sm:border-l sm:border-white/10 sm:pl-3">
-                                            You can leave this tab open — generation continues even if you switch away.
-                                        </span>
-                                    </div>
-
-                                    {/* Stage strip */}
-                                    <div className="flex items-center justify-between gap-2">
-                                        {stages.map((stage, idx) => {
-                                            const done = idx < activeStageIdx;
-                                            const active = idx === activeStageIdx;
-                                            return (
-                                                <div
-                                                    key={stage.id}
-                                                    className="flex-1 flex flex-col items-center gap-1.5 min-w-0"
-                                                >
-                                                    <div
-                                                        className={`w-9 h-9 rounded-full flex items-center justify-center text-base transition-all ${done
-                                                            ? 'bg-white/10 border border-white/30 text-white/90'
-                                                            : active
-                                                                ? 'bg-white/15 border border-white/50 text-white shadow-lg shadow-white/10 animate-pulse'
-                                                                : 'bg-white/2 border border-white/10 text-white/30'
-                                                            }`}
-                                                    >
-                                                        {done ? '✓' : stage.icon}
-                                                    </div>
-                                                    <span
-                                                        className={`text-[10px] uppercase tracking-wider truncate max-w-full ${active ? 'text-white' : done ? 'text-white/50' : 'text-white/30'
-                                                            }`}
-                                                    >
-                                                        {stage.label}
-                                                    </span>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-
-                                    <div className="h-px bg-white/5" />
-
-                                    {/* Per-scene live status grid — each tile pulses while its
-                                        scene is the in-flight one and fills in as scenes complete. */}
-                                    <div>
-                                        <div className="flex items-center justify-between mb-2.5">
-                                            <p className="text-xs text-white/60 font-medium">
-                                                {isAssembling ? 'Assembling final video' : `Scene ${completedScenes + 1} of ${totalScenes}`}
-                                            </p>
-                                            <p className="text-[11px] text-white/40 font-mono">
-                                                {completedScenes} / {totalScenes}
-                                            </p>
-                                        </div>
-                                        <div className="grid grid-cols-12 gap-1">
-                                            {Array.from({ length: totalScenes }).map((_, i) => {
-                                                const sceneStatus = storyboard.scenes?.[i]?.status;
-                                                const isComplete = sceneStatus === 'completed';
-                                                const isProcessing = sceneStatus === 'processing' || (i === completedScenes && !isAssembling);
-                                                const isFailed = sceneStatus === 'failed';
-                                                return (
-                                                    <div
-                                                        key={i}
-                                                        className={`h-1.5 rounded-full transition-all ${isFailed
-                                                            ? 'bg-danger/70'
-                                                            : isComplete
-                                                                ? 'bg-white/85'
-                                                                : isProcessing
-                                                                    ? 'bg-white/40 animate-pulse'
-                                                                    : 'bg-white/8'
-                                                            }`}
-                                                        title={`Scene ${i + 1}: ${sceneStatus || 'pending'}`}
-                                                    />
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-
-                                    {/* Footer microcopy — rotates based on stage */}
-                                    <p className="text-[11px] text-white/40 italic text-center">
-                                        {isAssembling
-                                            ? 'Final stitch — about 10 seconds'
-                                            : completedScenes === 0
-                                                ? 'Warming up the renderer…'
-                                                : `${completedScenes} scene${completedScenes === 1 ? '' : 's'} done — keep going`}
-                                    </p>
-
-                                    {/* "Did you know?" tip — rotates as scenes complete so the
-                                        user sees a fresh fact every minute or so. Deterministic
-                                        index, no timer or extra state. */}
-                                    {(() => {
-                                        const TIPS = [
-                                            'Manim is the open-source engine 3Blue1Brown uses for math animations.',
-                                            'Each scene renders independently — a failure only retries that one scene.',
-                                            'Narration runs locally via Piper TTS, so generation never blocks on a vendor API.',
-                                            'If a scene fails, its Manim code is still saved — you can inspect what the LLM tried.',
-                                            'Up to 6 scenes render in parallel, cutting wall-clock time dramatically.',
-                                            'The LLM cascade falls through OpenRouter → Gemini → Groq if one provider is rate-limited.',
-                                        ];
-                                        const tip = TIPS[(completedScenes + (isAssembling ? 1 : 0)) % TIPS.length];
-                                        return (
-                                            <div className="flex items-start gap-2 rounded-lg border border-white/8 bg-white/2 px-3 py-2.5">
-                                                <Info className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                                                <p className="text-[11px] text-slate-400 leading-relaxed">
-                                                    <span className="text-slate-300 font-medium">Did you know?</span>{' '}
-                                                    {tip}
-                                                </p>
-                                            </div>
-                                        );
-                                    })()}
-                                </div>
-                            );
-                        })()}
+                        {storyboard.status === 'processing' && !storyboard.finalVideoUrl && (
+                            <GenerationTheater
+                                phase={progress >= 100 ? 'assemble' : 'render'}
+                                done={completedScenes}
+                                total={totalScenes}
+                                sceneStatuses={storyboard.scenes?.map((s) => s.status)}
+                            />
+                        )}
 
                         {/* Error */}
                         {error && (
@@ -1288,6 +1151,31 @@ export function DashboardPage() {
                                     >
                                         <RefreshCcw className="w-4 h-4 inline mr-1" />
                                         Refresh Status
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Final video */}
+                        {finalVideoUrl && (
+                            <div className="glass-card rounded-2xl p-5 space-y-4">
+                                <h3 className="text-sm font-semibold text-slate-400">
+                                    🎬 Your Video Is Ready
+                                </h3>
+                                <div className="space-y-3">
+                                    <VideoPlayer
+                                        key={finalVideoUrl}
+                                        videoUrl={finalVideoUrl}
+                                        title={storyboard.title}
+                                        poster={storyboard.scenes?.find((s) => s.thumbnailUrl)?.thumbnailUrl}
+                                        className="aspect-video"
+                                    />
+                                    <button
+                                        onClick={handleDownload}
+                                        className="w-full flex items-center justify-center gap-2 rounded-xl bg-success/10 border border-success/20 py-2.5 text-sm font-medium text-success hover:bg-success/15 transition-colors"
+                                    >
+                                        <Download className="w-4 h-4" />
+                                        Download Video
                                     </button>
                                 </div>
                             </div>
@@ -1334,7 +1222,7 @@ export function DashboardPage() {
                                                         gradient + scene number when no thumbnail exists yet
                                                         (scene still rendering, or rendered before thumbs were
                                                         wired up). */}
-                                                    <div className="shrink-0 relative w-[72px] h-40px rounded-md overflow-hidden border border-white/8 bg-navy-900/60">
+                                                    <div className="shrink-0 relative w-[72px] h-[41px] rounded-md overflow-hidden border border-white/8 bg-navy-900/60">
                                                         {scene.thumbnailUrl ? (
                                                             <img
                                                                 src={scene.thumbnailUrl}
@@ -1379,6 +1267,17 @@ export function DashboardPage() {
 
                                                 {isExpanded && hasContent && (
                                                     <div className="px-4 pb-3 pt-1 space-y-2.5 border-t border-primary-500/5">
+                                                        {scene.videoUrl && (
+                                                            <div className="pt-2.5">
+                                                                <VideoPlayer
+                                                                    key={scene.videoUrl}
+                                                                    videoUrl={scene.videoUrl}
+                                                                    poster={scene.thumbnailUrl}
+                                                                    compact
+                                                                    className="aspect-video rounded-xl"
+                                                                />
+                                                            </div>
+                                                        )}
                                                         {scene.visualDescription && (
                                                             <div>
                                                                 <p className="text-[10px] font-semibold text-primary-300 uppercase tracking-wider mb-1">
@@ -1453,30 +1352,6 @@ export function DashboardPage() {
                                             </div>
                                         );
                                     })}
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Final video */}
-                        {finalVideoUrl && (
-                            <div className="glass-card rounded-2xl p-5 space-y-4">
-                                <h3 className="text-sm font-semibold text-slate-400">
-                                    🎬 Your Video Is Ready
-                                </h3>
-                                <div className="space-y-3">
-                                    <VideoPlayer
-                                        key={finalVideoUrl}
-                                        videoUrl={finalVideoUrl}
-                                        title={storyboard.title}
-                                        className="aspect-video"
-                                    />
-                                    <button
-                                        onClick={handleDownload}
-                                        className="w-full flex items-center justify-center gap-2 rounded-xl bg-success/10 border border-success/20 py-2.5 text-sm font-medium text-success hover:bg-success/15 transition-colors"
-                                    >
-                                        <Download className="w-4 h-4" />
-                                        Download Video
-                                    </button>
                                 </div>
                             </div>
                         )}

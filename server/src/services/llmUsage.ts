@@ -62,9 +62,13 @@ export interface GeminiUsageMetadata {
   totalTokenCount?: number;
 }
 
+/** Which part of the pipeline spent the money. */
+export type UsageStage = 'brief' | 'plan' | 'code' | 'repair' | 'other';
+
 export interface CallUsage {
   model: string;
   tier: string;
+  stage: UsageStage;
   inputTokens: number;
   outputTokens: number; // visible output only
   thinkingTokens: number;
@@ -81,7 +85,44 @@ interface RunTotals {
   cachedTokens: number;
   costUsd: number;
   costByTier: Record<string, number>;
+  /** Per-pipeline-stage split, so the expensive stage is visible at a glance. */
+  byStage: Record<string, { calls: number; costUsd: number; tokens: number }>;
   unpriced: Set<string>;
+  startedAt: number;
+}
+
+function newTotals(label: string): RunTotals {
+  return {
+    label,
+    calls: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    thinkingTokens: 0,
+    cachedTokens: 0,
+    costUsd: 0,
+    costByTier: {},
+    byStage: {},
+    unpriced: new Set(),
+    startedAt: Date.now(),
+  };
+}
+
+function mergeTotals(into: RunTotals, from: RunTotals): void {
+  into.calls += from.calls;
+  into.inputTokens += from.inputTokens;
+  into.outputTokens += from.outputTokens;
+  into.thinkingTokens += from.thinkingTokens;
+  into.cachedTokens += from.cachedTokens;
+  into.costUsd += from.costUsd;
+  into.startedAt = Math.min(into.startedAt, from.startedAt);
+  for (const [tier, usd] of Object.entries(from.costByTier)) {
+    into.costByTier[tier] = (into.costByTier[tier] ?? 0) + usd;
+  }
+  for (const [stage, v] of Object.entries(from.byStage)) {
+    const t = (into.byStage[stage] ??= { calls: 0, costUsd: 0, tokens: 0 });
+    t.calls += v.calls; t.costUsd += v.costUsd; t.tokens += v.tokens;
+  }
+  from.unpriced.forEach((m) => into.unpriced.add(m));
 }
 
 // ==========================================
@@ -91,7 +132,37 @@ interface RunTotals {
 // AsyncLocalStorage rather than a module-level counter: scenes are generated
 // with SCENE_CONCURRENCY workers in flight and several videos can overlap, so
 // a shared mutable total would mix them together.
-const runStore = new AsyncLocalStorage<RunTotals>();
+const runStore = new AsyncLocalStorage<{ totals: RunTotals; key: string | null }>();
+
+// ==========================================
+// PER-VIDEO TOTALS (ACROSS REQUESTS)
+// ==========================================
+//
+// One video's LLM spend is NOT one async call tree. In the live flow the user
+// clicks "Generate Code", which fires one HTTP request per scene, and only
+// later clicks "Render Final Video". AsyncLocalStorage cannot span those, so
+// the old per-run summary reported only whatever happened inside a single
+// request — for the two-step UI that meant the render phase's repair calls and
+// none of the N code-generation calls that dominate the bill.
+//
+// This map accumulates by storyboard id until the final video is assembled.
+const videoTotals = new Map<string, RunTotals>();
+
+// Abandoned drafts would otherwise accumulate forever. Bounded, oldest-first.
+const MAX_TRACKED_VIDEOS = 300;
+
+function trackedTotals(key: string): RunTotals {
+  let t = videoTotals.get(key);
+  if (!t) {
+    t = newTotals(`video ${key}`);
+    if (videoTotals.size >= MAX_TRACKED_VIDEOS) {
+      const oldest = videoTotals.keys().next().value;
+      if (oldest) videoTotals.delete(oldest);
+    }
+    videoTotals.set(key, t);
+  }
+  return t;
+}
 
 function fmtUsd(usd: number): string {
   return usd < 0.01 ? `$${usd.toFixed(5)}` : `$${usd.toFixed(4)}`;
@@ -112,7 +183,8 @@ function fmtTokens(n: number): string {
 export function recordUsage(
   model: string,
   tier: string,
-  usage: GeminiUsageMetadata | undefined
+  usage: GeminiUsageMetadata | undefined,
+  stage: UsageStage = 'other'
 ): CallUsage | null {
   try {
     if (!usage) return null;
@@ -145,26 +217,31 @@ export function recordUsage(
     ].join(' · ');
     const cost =
       costUsd === null ? 'cost n/a (unpriced model)' : `${fmtInr(costUsd)} (${fmtUsd(costUsd)})`;
-    console.log(`   💰 [${tier}] ${model} | ${parts} | ${cost}`);
+    console.log(`   💰 [${stage}/${tier}] ${model} | ${parts} | ${cost}`);
 
-    const run = runStore.getStore();
+    const run = runStore.getStore()?.totals;
     if (run) {
       run.calls += 1;
       run.inputTokens += inputTokens;
       run.outputTokens += outputTokens;
       run.thinkingTokens += thinkingTokens;
       run.cachedTokens += cachedTokens;
+      const st = (run.byStage[stage] ??= { calls: 0, costUsd: 0, tokens: 0 });
+      st.calls += 1;
+      st.tokens += inputTokens + outputTokens + thinkingTokens;
       if (costUsd === null) {
         run.unpriced.add(model);
       } else {
         run.costUsd += costUsd;
         run.costByTier[tier] = (run.costByTier[tier] ?? 0) + costUsd;
+        st.costUsd += costUsd;
       }
     }
 
     return {
       model,
       tier,
+      stage,
       inputTokens,
       outputTokens,
       thinkingTokens,
@@ -182,24 +259,155 @@ export function recordUsage(
  * Wrap one video generation in this to get a per-video total.
  */
 export async function withUsageRun<T>(label: string, fn: () => Promise<T>): Promise<T> {
-  const totals: RunTotals = {
-    label,
-    calls: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    thinkingTokens: 0,
-    cachedTokens: 0,
-    costUsd: 0,
-    costByTier: {},
-    unpriced: new Set(),
-  };
-
+  const totals = newTotals(label);
   try {
-    return await runStore.run(totals, fn);
+    return await runStore.run({ totals, key: null }, fn);
   } finally {
     // Printed even when the run throws — a failed video still cost money.
     logRunSummary(totals);
   }
+}
+
+/**
+ * Accumulate every LLM call inside `fn` against one video, across however many
+ * HTTP requests that video takes. Safe to nest and safe to call repeatedly for
+ * the same id — a storyboard's twelve "Generate Code" requests and its later
+ * render all fold into one running total.
+ *
+ * Nothing is printed here; the total is emitted once by `logVideoCost` when
+ * the final video is assembled.
+ */
+export async function withVideoCost<T>(
+  storyboardId: string | null,
+  fn: () => Promise<T>
+): Promise<T> {
+  // A null id still opens a scope: the brief and the scene plan are generated
+  // before the storyboard row exists, and `assignVideoCost` adopts that scope
+  // once the id is known. Returning fn() bare here would silently drop them.
+  const totals = storyboardId ? trackedTotals(storyboardId) : newTotals('pending video');
+  return runStore.run({ totals, key: storyboardId }, fn);
+}
+
+/**
+ * Account for a manual scene retry SEPARATELY from the video's own cost.
+ *
+ * A retry is remedial spend, not part of what a video costs to make. Folding it
+ * into the per-video total would mean the videos that went wrong report the
+ * highest "price to generate", which is exactly backwards for a reference
+ * figure — a scene retried four times would triple the apparent cost of the
+ * product.
+ *
+ * So it gets its own tally under its own key, is reported in full with the same
+ * token and money breakdown, and never touches `videoTotals[storyboardId]`.
+ * The video's reference price was already emitted when its final cut was first
+ * assembled.
+ */
+export async function withRetryCost<T>(
+  storyboardId: string,
+  sceneNumber: number,
+  fn: () => Promise<T>
+): Promise<T> {
+  const key = `retry:${storyboardId}:${sceneNumber}:${Date.now()}`;
+  const totals = newTotals(`retry scene ${sceneNumber}`);
+  videoTotals.set(key, totals);
+  try {
+    return await runStore.run({ totals, key }, fn);
+  } finally {
+    videoTotals.delete(key);
+    logRetrySummary(storyboardId, sceneNumber, totals);
+  }
+}
+
+function logRetrySummary(storyboardId: string, sceneNumber: number, t: RunTotals): void {
+  if (t.calls === 0) return;
+  const wall = ((Date.now() - t.startedAt) / 1000).toFixed(0);
+  const line = '─'.repeat(64);
+  console.log(`\n   ${line}`);
+  console.log(`   🔁 SCENE RETRY — scene ${sceneNumber} of ${storyboardId}`);
+  console.log(
+    `   tokens        in ${fmtTokens(t.inputTokens)} · out ${fmtTokens(t.outputTokens)} · ` +
+    `thinking ${fmtTokens(t.thinkingTokens)} · cached ${fmtTokens(t.cachedTokens)}`
+  );
+  for (const [stage, v] of Object.entries(t.byStage).sort((a, b) => b[1].costUsd - a[1].costUsd)) {
+    console.log(
+      `   ${stage.padEnd(13)} ${String(v.calls).padStart(2)} call(s) · ` +
+      `${fmtTokens(v.tokens).padStart(8)} tok · ${fmtInr(v.costUsd).padStart(9)}`
+    );
+  }
+  console.log(
+    `   💰 RETRY COST  ${fmtInr(t.costUsd)} (${fmtUsd(t.costUsd)}) · ${wall}s` +
+    `   — EXCLUDED from the video's reference price`
+  );
+  console.log(`   ${line}\n`);
+}
+
+/**
+ * Attach the running scope to a storyboard id that did not exist when the
+ * scope opened. Needed because the brief and the scene plan are generated
+ * BEFORE the storyboard row is created, so their cost has nowhere to go yet.
+ */
+export function assignVideoCost(storyboardId: string): void {
+  const store = runStore.getStore();
+  if (!store || store.key) return;
+  const target = trackedTotals(storyboardId);
+  mergeTotals(target, store.totals);
+  store.totals = target;
+  store.key = storyboardId;
+}
+
+/**
+ * Emit the final per-video cost and stop tracking it. Called once the final
+ * video exists, which is the only moment the number is actually complete.
+ */
+export function logVideoCost(
+  storyboardId: string,
+  meta?: { title?: string; scenes?: number; durationSec?: number | null }
+): void {
+  const t = videoTotals.get(storyboardId);
+  videoTotals.delete(storyboardId);
+  if (!t || t.calls === 0) return;
+
+  const wall = ((Date.now() - t.startedAt) / 1000).toFixed(0);
+  const perScene = meta?.scenes ? t.costUsd / meta.scenes : null;
+  const line = '═'.repeat(64);
+
+  console.log(`\n   ${line}`);
+  console.log(`   🎬 VIDEO COMPLETE — ${meta?.title || storyboardId}`);
+  console.log(`   ${line}`);
+  if (meta?.scenes) {
+    console.log(
+      `   scenes        ${meta.scenes}` +
+      (meta.durationSec ? `  ·  runtime ${meta.durationSec.toFixed(1)}s` : '') +
+      `  ·  wall clock ${wall}s`
+    );
+  }
+  console.log(
+    `   tokens        in ${fmtTokens(t.inputTokens)} · out ${fmtTokens(t.outputTokens)} · ` +
+    `thinking ${fmtTokens(t.thinkingTokens)} · cached ${fmtTokens(t.cachedTokens)}`
+  );
+  for (const [stage, v] of Object.entries(t.byStage).sort((a, b) => b[1].costUsd - a[1].costUsd)) {
+    const share = t.costUsd > 0 ? `${((v.costUsd / t.costUsd) * 100).toFixed(0)}%` : '—';
+    console.log(
+      `   ${stage.padEnd(13)} ${String(v.calls).padStart(2)} call(s) · ` +
+      `${fmtTokens(v.tokens).padStart(8)} tok · ${fmtInr(v.costUsd).padStart(9)} (${share})`
+    );
+  }
+  console.log(`   ${'─'.repeat(64)}`);
+  console.log(
+    `   💰 TOTAL LLM COST  ${fmtInr(t.costUsd)}  (${fmtUsd(t.costUsd)})` +
+    (perScene !== null ? `   ·   ${fmtInr(perScene)}/scene` : '')
+  );
+  console.log(`   (TTS and Manim rendering are self-hosted — no per-video charge.)`);
+  if (t.cachedTokens === 0 && t.inputTokens > 0) {
+    console.log(
+      `   💡 0 cached tokens across the whole video — the system prompt is being ` +
+      `billed at full rate on every scene.`
+    );
+  }
+  if (t.unpriced.size > 0) {
+    console.log(`   ⚠️  excludes unpriced model(s): ${[...t.unpriced].join(', ')}`);
+  }
+  console.log(`   ${line}\n`);
 }
 
 function logRunSummary(t: RunTotals): void {

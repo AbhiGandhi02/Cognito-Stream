@@ -8,6 +8,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { EXAMPLE_VIDEOS, type ExampleVideo } from '../data/examples';
+import { VideoPlayer } from './VideoPlayer';
 import { Play, X, Clock } from 'lucide-react';
 
 const CATEGORY_BADGE: Record<string, string> = {
@@ -44,6 +45,21 @@ async function resolveExample(video: ExampleVideo): Promise<ResolvedExample> {
     } catch {
         return { videoUrl: null, posterUrl: null };
     }
+}
+
+/**
+ * Anchors a root-relative asset path to the site origin.
+ *
+ * Example videos are static files under `client/public/examples/`, so a bare
+ * `<video src="/examples/x.mp4">` resolves against the page origin. `VideoPlayer`
+ * instead treats a non-`http` URL as API-server-relative and prefixes
+ * `VITE_API_URL` (same convention `data/demos.ts` documents) — which would send
+ * the request to the API host. Making the URL absolute keeps the modal loading
+ * the same bytes the cards do.
+ */
+function siteAbsolute(url?: string | null): string | undefined {
+    if (!url) return undefined;
+    return url.startsWith('http') ? url : `${window.location.origin}${url}`;
 }
 
 function ExampleCard({ video, onPlay }: { video: ExampleVideo; onPlay: (v: ExampleVideo) => void }) {
@@ -216,19 +232,15 @@ function VideoModal({ video, onClose }: { video: ExampleVideo; onClose: () => vo
                     </button>
                 </div>
 
-                {/* Video */}
-                <div className="aspect-video bg-black">
-                    <video
-                        key={video.id}
-                        src={video.videoUrl}
-                        poster={video.posterUrl}
-                        controls
-                        autoPlay
-                        className="w-full h-full"
-                    >
-                        Your browser does not support the video tag.
-                    </video>
-                </div>
+                {/* Video — shared player so the modal gets the same scrubber,
+                    speed menu, PiP and keyboard shortcuts as the dashboard. */}
+                <VideoPlayer
+                    key={video.id}
+                    videoUrl={siteAbsolute(video.videoUrl)}
+                    poster={siteAbsolute(video.posterUrl)}
+                    autoPlay
+                    className="aspect-video rounded-none border-x-0 border-t-0"
+                />
 
                 {/* Description */}
                 <div className="p-5">

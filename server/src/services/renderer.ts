@@ -49,8 +49,59 @@ interface SceneData {
 // ==========================================
 
 const RENDERER_URL = process.env.RENDERER_URL || 'http://localhost:5000';
-const RENDER_TIMEOUT = 300000; // 5 minutes
+// Must exceed the renderer's WORST case, not its render cap. Since renders now
+// queue behind a global concurrency limit, a request can wait
+// RENDER_QUEUE_TIMEOUT (240s default) before its 300s render even starts. At the
+// old 300s this client aborted mid-render and the scene was recorded as failed
+// while the renderer was still working on it — and the retry queued behind the
+// very work it had abandoned.
+const RENDER_QUEUE_WAIT = Number(process.env.RENDER_QUEUE_TIMEOUT) || 240;
+const RENDER_TIMEOUT = (RENDER_QUEUE_WAIT + 300 + 60) * 1000; // queue + render + slack
 const ASSEMBLE_TIMEOUT = 600000; // 10 minutes
+
+/**
+ * Output quality for every scene render and the final assembly.
+ *
+ * 'medium' is 1280x720 @30fps. 'high' (1920x1080 @60fps) was measured at 2x the
+ * render time — 1.9s -> 3.8s per scene locally — and deliberately NOT adopted:
+ * the renderer has no global concurrency cap, so two users generating at once
+ * already run 4 concurrent Manim processes on a 2 vCPU Space. Doubling per-render
+ * cost on top of that trades a sharpness gain for a stability risk.
+ *
+ * Revisit once the renderer caps concurrent renders. Until then the encode-side
+ * gain is where the quality came from: the audio-stitch pass now runs crf 18 /
+ * preset slow instead of crf 23 / preset fast, measured at SSIM 0.998885 ->
+ * 0.999524 for the same 0.4s, so the second encode is close to lossless.
+ *
+ * Override per-deploy with RENDER_QUALITY=high|low|ultra.
+ */
+const RENDER_QUALITY = process.env.RENDER_QUALITY || 'medium';
+
+/**
+ * Shared secret proving a request came from this API server.
+ *
+ * The renderer executes arbitrary Python; without this anyone who can reach the
+ * Space can run code in a container holding SUPABASE_SERVICE_ROLE_KEY. Must
+ * match RENDERER_SHARED_SECRET on the renderer. When unset here AND there, the
+ * renderer serves unauthenticated and warns — set it in both places.
+ */
+const RENDERER_SECRET = process.env.RENDERER_SHARED_SECRET || '';
+
+/** Headers for every renderer call. */
+function rendererHeaders(extra: Record<string, string> = {}): Record<string, string> {
+    return {
+        'Content-Type': 'application/json',
+        ...(RENDERER_SECRET ? { 'X-Renderer-Token': RENDERER_SECRET } : {}),
+        ...extra,
+    };
+}
+
+if (!RENDERER_SECRET) {
+    console.warn(
+        '⚠️  RENDERER_SHARED_SECRET is not set — renderer calls are unauthenticated. ' +
+        'Set it here and on the renderer to close an open code-execution endpoint.'
+    );
+}
 
 // ==========================================
 // RENDER SERVICE — Full Python Code Mode
@@ -63,7 +114,7 @@ const ASSEMBLE_TIMEOUT = 600000; // 10 minutes
 export async function triggerRendererWithCode(
     sceneId: string,
     manimCode: string,
-    quality: string = 'medium'
+    quality: string = RENDER_QUALITY
 ): Promise<CodeRenderResult> {
     console.log(`🎨 Triggering code renderer for scene: ${sceneId}`);
     console.log(`📊 Code length: ${manimCode.length} chars, Quality: ${quality}`);
@@ -78,9 +129,7 @@ export async function triggerRendererWithCode(
             },
             {
                 timeout: RENDER_TIMEOUT,
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: rendererHeaders(),
             }
         );
 
@@ -175,9 +224,7 @@ export async function triggerRenderer(
             },
             {
                 timeout: RENDER_TIMEOUT,
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: rendererHeaders(),
             }
         );
 
@@ -222,7 +269,7 @@ export async function triggerRenderer(
 export async function assembleVideo(
     storyboardId: string,
     scenes: SceneData[],
-    quality: string = 'medium',
+    quality: string = RENDER_QUALITY,
     title: string = ''
 ): Promise<AssembleResult> {
     console.log(`🎞️  Assembling video for storyboard: ${storyboardId} (title='${title}')`);
@@ -244,9 +291,7 @@ export async function assembleVideo(
             },
             {
                 timeout: ASSEMBLE_TIMEOUT,
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: rendererHeaders(),
             }
         );
 
@@ -304,7 +349,7 @@ export async function deleteFinalVideo(
         const response = await axios.post(
             `${RENDERER_URL}/delete-final`,
             { videoUrl: videoUrl ?? null, audioUrl: audioUrl ?? null },
-            { timeout: 30000, headers: { 'Content-Type': 'application/json' } }
+            { timeout: 30000, headers: rendererHeaders() }
         );
         const data = response.data ?? {};
         if (data.deleted?.length) {
@@ -324,6 +369,48 @@ export async function deleteFinalVideo(
     }
 }
 
+/**
+ * Remove a set of storage objects by the URLs recorded in the database.
+ *
+ * Used when a storyboard is deleted: its rows cascade away, but the per-scene
+ * mp4s, mp3s and thumbnails in the bucket would otherwise be orphaned with
+ * nothing left pointing at them. Roughly 6 MB per twelve-scene video, which on
+ * a 1 GB free tier is the difference between ~160 videos and unbounded growth.
+ *
+ * Best-effort by design: cleanup must never stop a user from deleting their
+ * own storyboard, so this resolves rather than throwing.
+ */
+export async function deleteStorageObjects(
+    urls: Array<string | null | undefined>
+): Promise<{ deleted: string[]; missing: string[]; failed: unknown[] }> {
+    const empty = { deleted: [], missing: [], failed: [] };
+    const clean = urls.filter((u): u is string => Boolean(u));
+    if (clean.length === 0) return empty;
+
+    try {
+        const response = await axios.post(
+            `${RENDERER_URL}/delete-final`,
+            { urls: clean },
+            { timeout: 60000, headers: rendererHeaders() }
+        );
+        const data = response.data ?? {};
+        if (data.deleted?.length) {
+            console.log(`🗑️  Removed ${data.deleted.length} storage object(s)`);
+        }
+        return {
+            deleted: data.deleted ?? [],
+            missing: data.missing ?? [],
+            failed: data.failed ?? [],
+        };
+    } catch (error) {
+        const msg = axios.isAxiosError(error)
+            ? `HTTP ${error.response?.status ?? error.code}`
+            : String((error as Error)?.message ?? error);
+        console.warn(`⚠️  Storage cleanup failed (${msg}) — objects may be orphaned.`);
+        return empty;
+    }
+}
+
 export async function checkRendererHealth(): Promise<{
     status: string;
     uptime: number;
@@ -336,6 +423,7 @@ export async function checkRendererHealth(): Promise<{
     try {
         const response = await axios.get(`${RENDERER_URL}/health`, {
             timeout: 5000,
+            headers: rendererHeaders(),
         });
 
         return response.data;
@@ -358,6 +446,7 @@ export async function getRendererStats(): Promise<{
     try {
         const response = await axios.get(`${RENDERER_URL}/stats`, {
             timeout: 5000,
+            headers: rendererHeaders(),
         });
 
         return response.data;

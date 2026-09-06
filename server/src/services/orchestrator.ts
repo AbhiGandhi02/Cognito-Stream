@@ -28,10 +28,10 @@
  */
 
 import { prisma } from '../lib/prisma';
-import { generateManimSceneCode, correctManimCode, normalizeManimCode } from './gemini';
+import { generateManimSceneCode, correctManimCode, normalizeManimCode, briefContextFromJson } from './gemini';
 import { triggerRendererWithCode } from './renderer';
 import { generateAudio } from './elevenlabs';
-import { withUsageRun } from './llmUsage';
+import { withVideoCost } from './llmUsage';
 import { resolveSceneDuration, countWords } from '../lib/narrationTiming';
 import { buildSceneContext, type SceneContextEntry } from './sceneContext';
 
@@ -84,6 +84,9 @@ export interface SceneInput {
     visualDescription: string;
     estimatedDuration: number;
     manimCode: string;
+    /** Present when the scene was already narrated (draft-time pre-narration). */
+    audioUrl?: string | null;
+    actualDuration?: number | null;
 }
 
 interface NarrationResult {
@@ -143,6 +146,89 @@ async function runPool<T>(
  * when the renderer is unreachable; the catch here covers its input guards
  * (empty or oversized narration).
  */
+/**
+ * Synthesise this scene's narration and persist BOTH the file and its measured
+ * length. Does not touch `status`, so it is safe to run against a draft
+ * storyboard the user is still reviewing.
+ *
+ * Reuses existing audio: re-narrating a scene that already has a measured
+ * track costs renderer CPU and produces the same bytes. Pass force=true after
+ * the narration text itself changes.
+ *
+ * `actualDuration` is written here rather than only at the end of a render.
+ * The read side already expected that — routes/scene.ts derives the code-gen
+ * timing budget from `scene.audioUrl ? scene.actualDuration : null` — but
+ * nothing ever wrote it before the render finished, so the branch was dead and
+ * every scene was coded against the word-count estimate instead.
+ */
+export async function ensureSceneAudio(
+    scene: { id: string; narration: string; audioUrl?: string | null; actualDuration?: number | null },
+    sceneLabel: string,
+    force = false
+): Promise<NarrationResult> {
+    if (!force && scene.audioUrl && typeof scene.actualDuration === 'number' && scene.actualDuration > 0) {
+        return { audioUrl: scene.audioUrl, duration: scene.actualDuration };
+    }
+
+    let audio: NarrationResult = { audioUrl: '', duration: 0 };
+    try {
+        audio = await generateAudio(scene.narration, scene.id);
+    } catch (audioError) {
+        const msg = String((audioError as Error)?.message ?? audioError).slice(0, 200);
+        console.warn(`⚠️ [${sceneLabel}] TTS unavailable (${msg}) — using estimated duration`);
+        return audio;
+    }
+
+    if (audio.audioUrl) {
+        await prisma.scene.update({
+            where: { id: scene.id },
+            data: {
+                audioUrl: audio.audioUrl,
+                // Measured length of the narration. Overwritten after a
+                // successful render with max(video, audio); until then this is
+                // the honest number for the code generator to build against.
+                actualDuration: audio.duration > 0 ? audio.duration : null,
+            },
+        }).catch(() => { /* row may be gone; the caller still gets the audio */ });
+    }
+
+    return audio;
+}
+
+/**
+ * Narrate every scene of a storyboard up front, so the code generator has a
+ * measured duration rather than a word-count estimate. Never throws.
+ *
+ * CURRENTLY UNUSED. It was called from storyboard creation to hide TTS latency,
+ * but narration is uploaded to the bucket and objects are only removed when a
+ * storyboard is deleted or pruned after a complete render — so every abandoned
+ * draft leaked its scene audio permanently.
+ *
+ * Do NOT re-attach this to draft creation without a cleanup path for drafts
+ * that are never rendered. It is safe to call from any point where the user has
+ * committed to rendering, which is where the latency hiding would still pay off.
+ */
+export async function narrateStoryboard(storyboardId: string): Promise<void> {
+    try {
+        const scenes = await prisma.scene.findMany({
+            where: { storyboardId },
+            orderBy: { sceneNumber: 'asc' },
+            select: { id: true, sceneNumber: true, narration: true, audioUrl: true, actualDuration: true },
+        });
+        if (scenes.length === 0) return;
+        console.log(`🎙️ Pre-narrating ${scenes.length} scene(s) for storyboard ${storyboardId}...`);
+        await runPool(scenes, PARALLEL_CONCURRENCY, async (sc) => {
+            await ensureSceneAudio(sc, `Scene ${sc.sceneNumber}`);
+        });
+        console.log(`✅ Pre-narration complete for storyboard ${storyboardId}`);
+    } catch (err) {
+        console.warn(
+            `⚠️ Pre-narration failed for ${storyboardId} ` +
+            `(${String((err as Error)?.message ?? err).slice(0, 160)}) — code gen will use estimates.`
+        );
+    }
+}
+
 async function narrateScene(
     scene: SceneInput,
     sceneLabel: string
@@ -152,28 +238,13 @@ async function narrateScene(
         data: { status: 'processing' },
     });
 
-    let audio: NarrationResult = { audioUrl: '', duration: 0 };
-    try {
-        audio = await generateAudio(scene.narration, scene.id);
-    } catch (audioError) {
-        const msg = String((audioError as Error)?.message ?? audioError).slice(0, 200);
-        console.warn(`⚠️ [${sceneLabel}] TTS unavailable (${msg}) — using estimated duration`);
-    }
+    const audio = await ensureSceneAudio(scene as any, sceneLabel);
 
     const targetDuration = resolveSceneDuration(scene.narration, audio.duration);
     console.log(
         `⏱️ [${sceneLabel}] Timing budget: ${targetDuration}s ` +
         `(${audio.duration > 0 ? `measured audio ${audio.duration.toFixed(1)}s` : 'estimated from word count'})`
     );
-
-    // Persist immediately. A scene whose render later fails still has usable
-    // narration, which is what a manual retry needs.
-    if (audio.audioUrl) {
-        await prisma.scene.update({
-            where: { id: scene.id },
-            data: { audioUrl: audio.audioUrl },
-        });
-    }
 
     return { audio, targetDuration };
 }
@@ -195,6 +266,10 @@ async function writeSceneCode(
         totalScenes: number;
         targetDuration: number;
         previousSceneContext: string;
+        /** Set on a retry: why the last attempt at this scene failed. */
+        previousFailure?: string;
+        /** Video-level example data and notation, from the stored brief. */
+        briefContext?: string;
     }
 ): Promise<string> {
     // A complete script is already stored — skip the AI call entirely.
@@ -210,7 +285,13 @@ async function writeSceneCode(
 
     // Older rows stored a JSON array of operation strings here; the first
     // entry made a usable title. Not JSON on the current path, which is fine.
-    let sceneTitle = `Scene ${scene.sceneNumber}`;
+    //
+    // The visual description is the better fallback: deriving the title from
+    // manimCode meant a RETRY — which wipes manimCode before regenerating —
+    // always got the bare "Scene N", a weaker prompt than the original run had.
+    let sceneTitle = scene.visualDescription
+        ? scene.visualDescription.trim().split(/(?<=[.!?])\s/)[0].slice(0, 60)
+        : `Scene ${scene.sceneNumber}`;
     try {
         const parsed = JSON.parse(scene.manimCode);
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -230,6 +311,8 @@ async function writeSceneCode(
         totalScenes: params.totalScenes,
         overallTopic: params.overallTopic,
         previousSceneContext: params.previousSceneContext || undefined,
+        previousFailure: params.previousFailure || undefined,
+        briefContext: params.briefContext || undefined,
     });
 
     await prisma.scene.update({
@@ -258,6 +341,19 @@ async function renderScene(
 
     try {
         let renderResult = await triggerRendererWithCode(scene.id, manimCode);
+
+        // Some failures are not code faults, and asking the model to "fix" them
+        // burns a full generation call plus another render on an error it
+        // cannot address. A render that timed out needs less content or more
+        // time; a busy queue needs neither.
+        const UNFIXABLE_BY_LLM = new Set(['TIMEOUT', 'RENDERER_BUSY']);
+        if (!renderResult.success && UNFIXABLE_BY_LLM.has(renderResult.errorType || '')) {
+            throw new Error(
+                `${renderResult.errorType}: ${renderResult.error || 'renderer could not complete this scene'} ` +
+                `— not a code fault, so no repair was attempted. ` +
+                `Retry the scene, or shorten its narration so the animation has less to draw.`
+            );
+        }
 
         while (!renderResult.success && correctionAttempts < MAX_CORRECTION_ATTEMPTS) {
             correctionAttempts++;
@@ -389,9 +485,11 @@ async function failScene(
 export async function processStoryboardScenes(
     storyboardId: string
 ): Promise<OrchestrationResult> {
-    // Wrap the whole video so every nested LLM call — across all concurrent
-    // scene workers — totals into one per-video cost line.
-    return withUsageRun(`storyboard ${storyboardId}`, () =>
+    // Fold every nested LLM call — across all concurrent scene workers — into
+    // this video's running total. Not printed here: code generation happened in
+    // earlier HTTP requests, so the number is only complete once the final
+    // video is assembled (see assembly.ts -> logVideoCost).
+    return withVideoCost(storyboardId, () =>
         processStoryboardScenesInner(storyboardId)
     );
 }
@@ -416,6 +514,7 @@ async function processStoryboardScenesInner(
     });
 
     const scenes: SceneInput[] = storyboard.scenes;
+    const briefContext = briefContextFromJson(storyboard.brief);
     const totalScenes = scenes.length;
     const overallTopic = storyboard.prompt;
     console.log(
@@ -452,6 +551,7 @@ async function processStoryboardScenesInner(
                 totalScenes,
                 targetDuration: prep.targetDuration,
                 previousSceneContext: buildSceneContext(contextEntries),
+                briefContext,
             });
         } catch (error) {
             prep.error = error instanceof Error ? error.message : 'Unknown error';
@@ -507,15 +607,17 @@ async function processStoryboardScenesInner(
     const completedScenes = results.filter((r) => r.status === 'completed').length;
     const failedScenes = results.filter((r) => r.status === 'failed').length;
 
-    // A partially completed storyboard is still watchable, so it counts as
-    // completed; only a total wipeout is a failure.
-    const storyboardStatus = completedScenes > 0 ? 'completed' : 'failed';
-
-    await prisma.storyboard.update({
-        where: { id: storyboardId },
-        data: { status: storyboardStatus },
-    });
-
+    // Status is NOT written here.
+    //
+    // It used to flip to 'completed' at this point, before assembly had run —
+    // so for the whole stitching window the storyboard read 'completed' with a
+    // null finalVideoUrl. The UI gates its progress card on
+    // status === 'processing', so the user watched an empty card through the
+    // one stage that has no per-scene feedback.
+    //
+    // Leaving it 'processing' lets assembleStoryboard own the terminal state:
+    // it sets 'completed' on success, and 'failed' both when no scene rendered
+    // and when assembly itself fails. Every exit path is covered there.
     console.log(`\n✅ Orchestration complete: ${completedScenes}/${totalScenes} scenes succeeded`);
 
     return {
@@ -546,7 +648,15 @@ export async function processScene(
     overallTopic: string,
     storyboardTitle: string,
     totalScenes: number,
-    previousSceneContext: string
+    previousSceneContext: string,
+    /**
+     * On a retry, the error the previous attempt died with. Passed into code
+     * generation so the model is told what not to do again, rather than
+     * regenerating with no knowledge that it already failed once.
+     */
+    previousFailure?: string,
+    /** The storyboard's stored brief JSON, if it has one. */
+    storedBrief?: string | null
 ): Promise<SceneProcessingResult> {
     const sceneLabel = `Scene ${scene.sceneNumber}`;
     console.log(`\n🎬 [${sceneLabel}] Starting processing...`);
@@ -560,6 +670,8 @@ export async function processScene(
             totalScenes,
             targetDuration,
             previousSceneContext,
+            previousFailure,
+            briefContext: briefContextFromJson(storedBrief),
         });
 
         return await renderScene(

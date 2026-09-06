@@ -71,7 +71,14 @@ export async function generateAudio(
       { sceneId, text },
       {
         timeout: TTS_TIMEOUT,
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // The renderer rejects unauthenticated requests when its shared
+          // secret is configured; /tts is protected alongside /render-code.
+          ...(process.env.RENDERER_SHARED_SECRET
+            ? { 'X-Renderer-Token': process.env.RENDERER_SHARED_SECRET }
+            : {}),
+        },
       }
     );
 

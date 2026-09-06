@@ -466,3 +466,61 @@ body {
 [data-theme="light"] .force-dark-controls [class*=":border-white"]:hover {
   border-color: rgba(255, 255, 255, 0.15) !important;
 }
+
+/* ------------------------------------------------------------------
+   Video player volume slider
+   ------------------------------------------------------------------
+   Native range chrome can't be themed consistently across browsers, so the
+   track is painted with a gradient driven by `--vp-fill` (set inline from the
+   current volume) and the thumb is drawn by hand. Lives here rather than in
+   the component because ::-webkit-slider-thumb has no Tailwind equivalent. */
+.vp-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #ffffff 0%,
+    #ffffff var(--vp-fill, 100%),
+    rgba(255, 255, 255, 0.25) var(--vp-fill, 100%),
+    rgba(255, 255, 255, 0.25) 100%
+  );
+  outline: none;
+  cursor: pointer;
+}
+.vp-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+.vp-range::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: none;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+.vp-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: transparent;
+}
+.vp-range:focus-visible {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.45);
+}
+
+/* Fullscreen shell: fill the screen and letterbox the frame in black. */
+.force-dark-controls:fullscreen,
+.force-dark-controls:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+}

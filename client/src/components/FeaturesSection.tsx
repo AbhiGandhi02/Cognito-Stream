@@ -4,7 +4,7 @@
  *
  * Updated to reflect actual current pipeline: AI storyboarding, Manim
  * rendering, Piper TTS narration, scene-level editing/iteration,
- * automatic assembly, and Gemini→Groq fallback.
+ * automatic assembly, and dual-key Gemini quota failover.
  */
 
 import { motion } from 'framer-motion';
@@ -45,8 +45,8 @@ const features = [
     },
     {
         icon: Shuffle,
-        title: 'LLM fallback',
-        description: 'Gemini first, Groq when quota or upstream issues hit. Renders never block on a single provider.',
+        title: 'Quota failover',
+        description: 'Two Gemini keys, tried in order — the paid key takes over automatically when the free tier hits its quota.',
     },
 ];
 

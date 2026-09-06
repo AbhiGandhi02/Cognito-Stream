@@ -2,13 +2,14 @@ import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
 import { generateAudio } from '../services/elevenlabs';
 import { triggerRenderer } from '../services/renderer';
-import { generateManimSceneCode } from '../services/gemini';
-import { processScene } from '../services/orchestrator';
+import { generateManimSceneCode, briefContextFromJson } from '../services/gemini';
+import { processScene, ensureSceneAudio } from '../services/orchestrator';
 import { rebuildFinalVideo } from '../services/assembly';
 import { validateRequest } from '../middleware/validation';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { resolveSceneDuration, countWords } from '../lib/narrationTiming';
 import { buildSceneContext } from '../services/sceneContext';
+import { withVideoCost, withRetryCost } from '../services/llmUsage';
 import { z } from 'zod';
 
 const router = Router();
@@ -136,7 +137,10 @@ router.patch(
       updateData.visualDescription = visualDescription;
     }
 
-    // If narration or code changed, reset status and clear URLs
+    // If narration or code changed, reset status and clear URLs.
+    // Clearing audioUrl AND actualDuration together matters: they are now read
+    // as a pair to decide whether a scene has a measured timing budget, so a
+    // stale duration left behind would be applied to the new narration.
     if (narration || manimCode) {
       updateData.status = 'pending';
       updateData.audioUrl = null;
@@ -226,14 +230,24 @@ router.post(
       code = sourceScene.manimCode;
     } else {
       console.log(`🎨 Generating Manim code for scene ${scene.sceneNumber}: "${scene.visualDescription.slice(0, 50)}"`);
-      // Timing budget: the measured narration audio if this scene has already
-      // been voiced, otherwise a word-count estimate. Never the flat constant
-      // that used to make every scene target ~5 seconds regardless of script.
-      const targetDuration = resolveSceneDuration(
-        scene.narration,
-        scene.audioUrl ? scene.actualDuration : null
+      // Timing budget: the MEASURED narration length. Narrating first is the
+      // whole point of the design — an animation built to a word-count guess
+      // either freezes on its last frame while the narrator talks, or gets cut
+      // off mid-motion. The estimate is ~3% off on average but up to 20% off on
+      // an individual scene, because pauses track punctuation, not word count.
+      //
+      // Normally a no-op: POST /api/storyboard already pre-narrates in the
+      // background, so the audio is usually on disk by the time the user
+      // reaches this step. This call covers the race (user clicks Generate Code
+      // immediately) and the retry path, and falls back to the estimate if TTS
+      // is unavailable.
+      const audio = await ensureSceneAudio(scene, `Scene ${scene.sceneNumber}`);
+      const targetDuration = resolveSceneDuration(scene.narration, audio.duration);
+      console.log(
+        `⏱️  [Scene ${scene.sceneNumber}] Timing budget: ${targetDuration}s ` +
+        `(${audio.duration > 0 ? `measured audio ${audio.duration.toFixed(1)}s` : 'estimated from word count'})`
       );
-      code = await generateManimSceneCode({
+      code = await withVideoCost(scene.storyboardId, () => generateManimSceneCode({
         sceneTitle: `Scene ${scene.sceneNumber}`,
         narration: scene.narration,
         visualDescription: scene.visualDescription,
@@ -243,7 +257,8 @@ router.post(
         totalScenes: scene.storyboard.scenes.length,
         overallTopic: scene.storyboard.prompt,
         previousSceneContext: previousSceneContext || undefined,
-      });
+        briefContext: briefContextFromJson(scene.storyboard.brief) || undefined,
+      }));
     }
 
     const updatedScene = await prisma.scene.update({
@@ -306,6 +321,17 @@ router.post(
         }))
     );
 
+    // Why the previous attempt died. Read BEFORE the wipe below clears it —
+    // this is the single most useful thing to tell the model on a retry, and
+    // it was previously discarded, so a retry regenerated with no knowledge
+    // that it had already failed once.
+    const previousFailure = scene.errorMessage
+      ? `${scene.errorMessage}`.slice(0, 1500) +
+        (scene.correctionAttempts > 0
+          ? `\n\n(That attempt already went through ${scene.correctionAttempts} automatic repair pass(es) without success, so a small tweak is unlikely to fix it.)`
+          : '')
+      : undefined;
+
     // Wipe stored code + reset state so processScene re-generates from scratch
     // (otherwise the AI-skip optimization would just retry the broken script).
     await prisma.scene.update({
@@ -323,19 +349,27 @@ router.post(
 
     console.log(`🔁 [scene ${scene.sceneNumber}] Regenerating after manual retry...`);
 
-    const result = await processScene(
-      {
-        id: scene.id,
-        sceneNumber: scene.sceneNumber,
-        narration: scene.narration,
-        visualDescription: scene.visualDescription,
-        estimatedDuration: scene.estimatedDuration,
-        manimCode: '',
-      },
-      scene.storyboard.prompt,
-      scene.storyboard.title,
-      scene.storyboard.scenes.length,
-      previousSceneContext,
+    // Accounted separately from the video's reference price: a retry is
+    // remedial spend, and charging it to the video would make the videos that
+    // went wrong look like the most expensive ones to produce. Logged in full
+    // either way — same token and money breakdown, its own summary block.
+    const result = await withRetryCost(scene.storyboardId, scene.sceneNumber, () =>
+      processScene(
+        {
+          id: scene.id,
+          sceneNumber: scene.sceneNumber,
+          narration: scene.narration,
+          visualDescription: scene.visualDescription,
+          estimatedDuration: scene.estimatedDuration,
+          manimCode: '',
+        },
+        scene.storyboard.prompt,
+        scene.storyboard.title,
+        scene.storyboard.scenes.length,
+        previousSceneContext,
+        previousFailure,
+        scene.storyboard.brief,
+      )
     );
 
     // The storyboard's assembled video no longer reflects this scene. Rebuild

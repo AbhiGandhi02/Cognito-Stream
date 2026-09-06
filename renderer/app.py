@@ -12,7 +12,9 @@ import urllib.request
 import wave
 from pathlib import Path
 import logging
+import threading
 import traceback
+from contextlib import contextmanager
 import time
 from datetime import datetime
 
@@ -58,6 +60,83 @@ SUPABASE_URL = os.getenv('SUPABASE_URL', '').rstrip('/')
 SUPABASE_SERVICE_ROLE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY', '')
 SUPABASE_BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET', 'cognito-stream')
 USE_CLOUD_STORAGE = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+# ==========================================
+# ACCESS CONTROL
+# ==========================================
+#
+# /render-code executes an arbitrary Python string. With no authentication and a
+# publicly reachable Space that is remote code execution against a container
+# holding SUPABASE_SERVICE_ROLE_KEY, which grants full read/write on the bucket.
+# /assemble, /tts and /delete-final are equally sensitive (/delete-final can
+# remove finished videos).
+#
+# Every request must carry X-Renderer-Token matching RENDERER_SHARED_SECRET.
+#
+# When the secret is UNSET the service still serves, loudly warning on startup
+# and on each rejected-if-configured route. That is deliberate: the renderer and
+# the API server deploy separately, so failing closed by default would guarantee
+# an outage window for anyone who deploys the renderer before setting the
+# variable. It is not "secure by default" — it is "does not break on deploy",
+# and the warning says exactly that.
+RENDERER_SHARED_SECRET = os.getenv('RENDERER_SHARED_SECRET', '')
+AUTH_EXEMPT_PATHS = {'/health'}   # container healthcheck must work unauthenticated
+
+
+@app.before_request
+def _require_shared_secret():
+    if request.path in AUTH_EXEMPT_PATHS or request.method == 'OPTIONS':
+        return None
+    if not RENDERER_SHARED_SECRET:
+        return None
+    supplied = request.headers.get('X-Renderer-Token', '')
+    # compare_digest keeps the check constant-time.
+    import hmac
+    if not hmac.compare_digest(supplied, RENDERER_SHARED_SECRET):
+        logger.warning(
+            f"Rejected unauthenticated {request.method} {request.path} "
+            f"from {request.remote_addr}"
+        )
+        return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+    return None
+
+
+# ==========================================
+# RENDER CONCURRENCY
+# ==========================================
+#
+# SCENE_CONCURRENCY on the API server limits scenes PER STORYBOARD. It cannot
+# limit anything across storyboards, so two users generating at once ran 4
+# concurrent Manim processes and five users ran 10 — on a 2 vCPU Space. Manim is
+# CPU-bound and memory-hungry; that is how this service falls over.
+#
+# Requests QUEUE rather than fail: a caller that waits 40s for a slot still gets
+# its video, whereas a 503 turns into a failed scene and an LLM repair call for
+# an error the model cannot fix.
+MAX_CONCURRENT_RENDERS = int(os.getenv('MAX_CONCURRENT_RENDERS', '0')) or (os.cpu_count() or 2)
+# Below the API server's 300s per-render timeout, so a queued request gives up
+# and reports honestly rather than having the connection cut from under it.
+RENDER_QUEUE_TIMEOUT = int(os.getenv('RENDER_QUEUE_TIMEOUT', '240'))
+_render_slots = threading.BoundedSemaphore(MAX_CONCURRENT_RENDERS)
+
+
+@contextmanager
+def render_slot(label):
+    """Hold one of the renderer's CPU slots, queueing if all are busy."""
+    waited = time.time()
+    if not _render_slots.acquire(timeout=RENDER_QUEUE_TIMEOUT):
+        raise TimeoutError(
+            f'renderer busy: no slot within {RENDER_QUEUE_TIMEOUT}s '
+            f'({MAX_CONCURRENT_RENDERS} concurrent renders max)'
+        )
+    queued = time.time() - waited
+    if queued > 1.0:
+        logger.info(f"{label}: waited {queued:.1f}s for a render slot")
+    try:
+        yield
+    finally:
+        _render_slots.release()
+
 
 _supabase_client = None
 
@@ -127,9 +206,17 @@ def download_to_local(url_or_path, dest_dir):
     """
     if url_or_path.startswith('http://') or url_or_path.startswith('https://'):
         filename = url_or_path.rstrip('/').split('/')[-1].split('?')[0]
+        # Fast path: this container may still hold the file it uploaded. Scene
+        # ids are unique, so a name match here is the same object. Saves
+        # re-downloading ~1.5 MB per scene on every assemble.
+        for cached in (OUTPUT_DIR / filename, AUDIO_DIR / filename):
+            if cached.exists() and cached.stat().st_size > 0:
+                logger.info(f"Using local copy of {filename} (skipping download)")
+                return str(cached)
         local_path = Path(dest_dir) / filename
-        with urllib.request.urlopen(url_or_path, timeout=60) as resp:
+        with urllib.request.urlopen(url_or_path, timeout=120) as resp:
             local_path.write_bytes(resp.read())
+        logger.info(f"Downloaded {filename} from storage")
         return str(local_path)
     # Relative path like /videos/foo.mp4 — strip the leading bucket prefix.
     if url_or_path.startswith('/videos/'):
@@ -154,31 +241,19 @@ def piper_voice_url(voice_name, filename):
     )
 
 # Quality presets
+# Maps our quality name to Manim's own preset. ONLY the 'quality' value is
+# used — its first letter becomes the -q flag, and Manim decides resolution and
+# frame rate from that.
+#
+# The resolution/fps/bitrate keys that used to sit here were dead: nothing read
+# them, so 'bitrate': '2500k' was never passed to any encoder and the declared
+# fps disagreed with what Manim actually produced. Verified values are in the
+# comments below so the mapping is not guesswork.
 QUALITY_PRESETS = {
-    'low': {
-        'quality': 'low_quality',
-        'resolution': '854,480',
-        'fps': 24,
-        'bitrate': '1000k'
-    },
-    'medium': {
-        'quality': 'medium_quality',
-        'resolution': '1280,720',
-        'fps': 30,
-        'bitrate': '2500k'
-    },
-    'high': {
-        'quality': 'high_quality',
-        'resolution': '1920,1080',
-        'fps': 30,
-        'bitrate': '5000k'
-    },
-    'ultra': {
-        'quality': 'production_quality',
-        'resolution': '2560,1440',
-        'fps': 60,
-        'bitrate': '8000k'
-    }
+    'low':    {'quality': 'low_quality'},         # 854x480  @15fps
+    'medium': {'quality': 'medium_quality'},      # 1280x720 @30fps
+    'high':   {'quality': 'high_quality'},        # 1920x1080 @60fps
+    'ultra':  {'quality': 'production_quality'},  # 2560x1440 @60fps
 }
 
 # Statistics
@@ -393,41 +468,26 @@ def render_scene_with_manim(scene_file, scene_id, quality='medium'):
             logger.error(f"Manim error: {result.stderr}")
             raise Exception(f"Manim render failed: {result.stderr}")
         
-        # Find the rendered file - Manim puts files in nested directories
-        possible_paths = [
-            output_file,
-            OUTPUT_DIR / 'videos' / f'{scene_id}.mp4',
-            OUTPUT_DIR / 'videos' / str(scene_file.stem) / f'{scene_id}.mp4',
+        # Same discipline as /render-code: only files produced BY THIS RENDER
+        # count. This path previously listed the destination first (returning a
+        # stale mp4 from an earlier render of the same scene) and then, failing
+        # that, moved ANY mp4 found anywhere under OUTPUT_DIR into place — which
+        # could hand back a completely unrelated scene's video.
+        candidates = [
+            m for m in OUTPUT_DIR.glob('**/*.mp4')
+            if 'partial_movie_files' not in m.parts
+            and m != output_file
+            and m.stat().st_mtime >= start_time
         ]
-        
-        # Also search for any mp4 files with our scene_id in the videos directory
-        for mp4_file in OUTPUT_DIR.glob(f'**/*{scene_id}*.mp4'):
-            if mp4_file not in possible_paths:
-                possible_paths.append(mp4_file)
-        
-        # Also try to find any recently created mp4 file (within last 5 minutes)
-        for mp4_file in OUTPUT_DIR.glob('**/*.mp4'):
-            if mp4_file.stat().st_mtime > start_time - 10:  # Created after render started
-                if mp4_file not in possible_paths:
-                    possible_paths.append(mp4_file)
-        
-        logger.info(f"Searching for video in paths: {possible_paths}")
-        
-        for path in possible_paths:
-            if path.exists():
-                # Move to output directory if not already there
-                if path != output_file:
-                    shutil.move(str(path), str(output_file))
-                logger.info(f"✓ Render complete: {output_file} ({render_time:.2f}s)")
-                return output_file, render_time
-        
-        # Last resort - find ANY mp4 in the videos folder
-        for mp4_file in list(OUTPUT_DIR.glob('**/*.mp4'))[:1]:
-            logger.info(f"Found fallback video: {mp4_file}")
-            shutil.move(str(mp4_file), str(output_file))
-            return output_file, render_time
-        
-        raise Exception("Rendered video file not found")
+        candidates.sort(key=lambda m: (m.name != f'{scene_id}.mp4', -m.stat().st_mtime))
+
+        if not candidates:
+            raise Exception("Rendered video file not found")
+
+        output_file.unlink(missing_ok=True)
+        shutil.move(str(candidates[0]), str(output_file))
+        logger.info(f"✓ Render complete: {output_file} ({render_time:.2f}s)")
+        return output_file, render_time
         
     except subprocess.TimeoutExpired:
         raise Exception("Rendering timeout exceeded (5 minutes)")
@@ -490,11 +550,23 @@ def stitch_audio_video(video_path, audio_path, output_path):
         '-vf', f'tpad=stop_mode=clone:stop_duration={target + 0.5}',
         '-af', f'apad=pad_dur={target + 0.5}',
         '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '23',
+        # Every scene is encoded TWICE: once by Manim, then again here when the
+        # narration is muxed in. crf 23 / preset fast measured SSIM 0.998885
+        # against the Manim original; crf 18 / preset slow measured 0.999524 in
+        # the SAME 0.4s, so the sharper setting is effectively free — the only
+        # cost is file size, which is trivial next to what pruning scene files
+        # already saves.
+        '-preset', 'slow',
+        '-crf', '18',
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
         '-b:a', '192k',
+        # Sample rate and channel count are pinned, not inherited from the mp3.
+        # concat -c copy requires every input to agree on these exactly, and
+        # Piper's output rate is not guaranteed to match the silent track we
+        # synthesise for scenes that have no narration.
+        '-ar', '44100',
+        '-ac', '2',
         '-t', f'{target:.3f}',
         '-y',
         str(output_path),
@@ -510,6 +582,65 @@ def stitch_audio_video(video_path, audio_path, output_path):
         logger.error(f"Audio stitching failed: {e}")
         raise
 
+def ensure_audio_track(video_path, output_path):
+    """Re-encode a video that has no audio so it matches the stitched scenes.
+
+    The final concat uses the concat demuxer with `-c copy`, which requires
+    every input to have the SAME stream layout. Scenes with narration come out
+    of stitch_audio_video as h264 + aac; a scene whose narration was missing or
+    whose stitch failed was previously appended as the raw Manim mp4 — video
+    only. Concatenating one-stream and two-stream files together is exactly the
+    case `-c copy` cannot handle, and it needs only a single TTS failure to
+    occur, in a pipeline that deliberately treats TTS failure as non-fatal.
+
+    Adding silence costs one re-encode of a scene that had no audio anyway, and
+    keeps the fast copy-mode concat viable for everything else.
+    """
+    cmd = [
+        'ffmpeg',
+        '-i', str(video_path),
+        '-f', 'lavfi',
+        '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+        '-c:v', 'libx264',
+        # Matches stitch_audio_video exactly — a narration-less scene must not
+        # be visibly softer than its neighbours.
+        '-preset', 'slow',
+        '-crf', '18',
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-ar', '44100',
+        '-ac', '2',
+        '-shortest',
+        '-y',
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise Exception(f"FFmpeg silent-track error: {result.stderr[-400:]}")
+    logger.info(f"\u2713 Added silent audio track to {Path(video_path).name}")
+    return output_path
+
+
+def has_audio_stream(video_path):
+    """True when the file carries at least one audio stream."""
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'a',
+        '-show_entries', 'stream=codec_type',
+        '-of', 'csv=p=0',
+        str(video_path),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return 'audio' in (r.stdout or '')
+    except Exception as e:
+        # Unknown means "assume it needs normalising" — a needless re-encode is
+        # far cheaper than a corrupt final video.
+        logger.warning(f"Could not probe audio streams for {video_path}: {e}")
+        return False
+
+
 def concatenate_videos(video_paths, output_path):
     """Concatenate multiple videos using FFmpeg"""
     
@@ -524,35 +655,47 @@ def concatenate_videos(video_paths, output_path):
             abs_path = Path(video_path).resolve()
             f.write(f"file '{abs_path}'\n")
     
-    cmd = [
-        'ffmpeg',
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', str(concat_file),
-        '-c', 'copy',
-        '-y',
-        str(output_path)
-    ]
-    
+    def run(mode):
+        if mode == 'copy':
+            codec = ['-c', 'copy']
+        else:
+            # Last resort: re-encode everything to one canonical format. Slower,
+            # but it cannot be defeated by a stream-layout mismatch.
+            codec = [
+                '-c:v', 'libx264', '-preset', 'slow', '-crf', '18',
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2',
+            ]
+        cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', str(concat_file),
+               *codec, '-y', str(output_path)]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-        
+        # Stream copy first: it is near-instant and correct whenever every
+        # input already shares a layout, which ensure_audio_track guarantees.
+        result = run('copy')
+
         if result.returncode != 0:
-            raise Exception(f"FFmpeg concat error: {result.stderr}")
-        
-        # Cleanup concat file
-        concat_file.unlink()
-        
-        logger.info(f"✓ Videos concatenated successfully")
+            # Do not fail the video here. A mismatch that slipped past
+            # normalisation is recoverable by re-encoding, and losing the whole
+            # render to a codec detail is the worse outcome by far.
+            logger.warning(
+                f"Concat with -c copy failed ({result.stderr.strip()[-300:]}) — "
+                "retrying with a full re-encode."
+            )
+            result = run('reencode')
+            if result.returncode != 0:
+                raise Exception(f"FFmpeg concat error: {result.stderr}")
+            logger.info("\u2713 Videos concatenated (re-encoded)")
+        else:
+            logger.info("\u2713 Videos concatenated successfully")
+
+        concat_file.unlink(missing_ok=True)
         return output_path
-        
+
     except Exception as e:
         logger.error(f"Video concatenation failed: {e}")
+        concat_file.unlink(missing_ok=True)
         raise
 
 def extract_thumbnail(video_path, output_path, width=480):
@@ -575,40 +718,6 @@ def extract_thumbnail(video_path, output_path, width=480):
         return output_path
     except Exception as e:
         logger.warning(f"Thumbnail extraction failed: {e}")
-        raise
-
-def concatenate_audio(audio_paths, output_path):
-    """Concatenate multiple mp3 files into one using FFmpeg's concat demuxer.
-    Re-encodes to libmp3lame because copy-mode can produce VBR-mismatched output."""
-
-    logger.info(f"Concatenating {len(audio_paths)} audio files...")
-
-    concat_file = TEMP_DIR / f'concat_audio_{int(time.time())}.txt'
-    with open(concat_file, 'w') as f:
-        for audio_path in audio_paths:
-            abs_path = Path(audio_path).resolve()
-            f.write(f"file '{abs_path}'\n")
-
-    cmd = [
-        'ffmpeg',
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', str(concat_file),
-        '-c:a', 'libmp3lame',
-        '-b:a', '128k',
-        '-y',
-        str(output_path),
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            raise Exception(f"FFmpeg audio concat error: {result.stderr}")
-        concat_file.unlink(missing_ok=True)
-        logger.info(f"✓ Audio concatenated successfully")
-        return output_path
-    except Exception as e:
-        logger.error(f"Audio concatenation failed: {e}")
         raise
 
 def get_video_duration(video_path):
@@ -1025,23 +1134,45 @@ def render_full_code():
         ]
         
         logger.info(f"Executing: {' '.join(cmd)}")
-        
+
         start_time = time.time()
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            timeout=300,
-            cwd=str(job_dir)
-        )
-        
+
+        # Queue behind the global slot limit. Only the Manim subprocess is held:
+        # the AST parse, lint and uploads around it are cheap and must not
+        # occupy a CPU slot other renders are waiting on.
+        try:
+            with render_slot(f'scene {scene_id}'):
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    timeout=300,
+                    cwd=str(job_dir)
+                )
+        except TimeoutError as busy:
+            logger.error(f"{scene_id}: {busy}")
+            if job_dir.exists():
+                shutil.rmtree(job_dir, ignore_errors=True)
+            stats['failed_renders'] += 1
+            return jsonify({
+                'success': False,
+                'error': str(busy),
+                # Not a code fault — flagged so the caller does not spend an LLM
+                # repair call trying to fix a queue.
+                'error_type': 'RENDERER_BUSY',
+            }), 503
+
         render_time = time.time() - start_time
         
         if result.returncode != 0:
             logger.error(f"Manim render failed for {scene_id}: {result.stderr[:500]}")
-            
+            # Counted here too. Only exceptions were tallied before, so the
+            # single most common failure — Manim exiting non-zero on bad code —
+            # never appeared in /stats, making the success rate read far higher
+            # than it was.
+            stats['failed_renders'] += 1
+
             parsed = parse_manim_errors(result.stderr, result.stdout)
             response_payload = {
                 'success': False,
@@ -1060,28 +1191,48 @@ def render_full_code():
             return jsonify(response_payload), 500
         
         # --- Step 3: Find the rendered video ---
-        # Search for the output video in various locations
-        possible_paths = [output_file]
-        for mp4_file in job_dir.glob('**/*.mp4'):
-            if mp4_file not in possible_paths:
-                possible_paths.append(mp4_file)
-        
-        found_video = None
-        for vpath in possible_paths:
-            if vpath.exists():
-                if vpath != output_file:
-                    shutil.move(str(vpath), str(output_file))
-                found_video = output_file
-                break
-        
-        if not found_video:
+        #
+        # Search ONLY inside job_dir. `output_file` is the DESTINATION for this
+        # render, not a place Manim ever writes to (--media_dir points at
+        # job_dir/media), so it must never be a search candidate.
+        #
+        # It used to be the FIRST candidate, which meant a leftover mp4 from an
+        # earlier render of the same scene short-circuited the search: the fresh
+        # render was deleted along with job_dir and the stale file was returned
+        # as this run's output, along with its duration and thumbnail. Every
+        # re-render of a scene silently served the previous video, which is why
+        # editing code and re-rendering could appear to do nothing.
+        #
+        # partial_movie_files/ holds Manim's per-animation fragments. The old
+        # glob matched those too, in arbitrary order, so a fragment could be
+        # picked instead of the finished scene.
+        candidates = [
+            m for m in job_dir.glob('**/*.mp4')
+            if 'partial_movie_files' not in m.parts
+        ]
+        # `-o {scene_id}.mp4` names the finished render; prefer it, then fall
+        # back to the newest remaining file.
+        candidates.sort(key=lambda m: (m.name != f'{scene_id}.mp4', -m.stat().st_mtime))
+
+        if not candidates:
             logger.error(f"Video not found after render for {scene_id}")
             if job_dir.exists():
                 shutil.rmtree(job_dir, ignore_errors=True)
+            # Deliberately does NOT fall back to a previous render of this
+            # scene. Reporting failure lets the correction loop do its job;
+            # silently returning last time's video does not.
             return jsonify({
                 'success': False,
                 'error': 'Rendered video file not found.'
             }), 500
+
+        # Replace any previous render of this scene. Only reached on success, so
+        # a failed re-render leaves the earlier file untouched rather than
+        # destroying a good video.
+        output_file.unlink(missing_ok=True)
+        shutil.move(str(candidates[0]), str(output_file))
+        found_video = output_file
+        logger.info(f"Rendered scene file: {candidates[0].name} -> {output_file.name}")
         
         # Get video info
         video_duration = get_video_duration(output_file)
@@ -1095,9 +1246,30 @@ def render_full_code():
 
         logger.info(f"✓ Code render complete: {scene_id} ({render_time:.2f}s)")
 
-        # Per-scene videos stay on local disk; only the final assembled video
-        # is uploaded to Supabase by /assemble to keep bucket usage minimal.
-        video_url = f'/videos/{scene_id}.mp4'
+        # Per-scene videos are uploaded, not just kept on local disk.
+        #
+        # This container's filesystem is ephemeral — a Space restart, sleep or
+        # rebuild wipes /app/output. The database stores scene.videoUrl as a
+        # durable pointer, so a local-only path became a dangling reference the
+        # moment that happened: re-assembling then silently dropped every scene
+        # whose file had vanished, and the dashboard's per-scene previews 404'd.
+        #
+        # The local copy is KEPT as well, so assembly in the same session still
+        # reads from disk (see download_to_local) and only pays the download
+        # when the file is genuinely gone.
+        scene_public_url = None
+        try:
+            scene_public_url = upload_to_storage(
+                local_path=str(output_file),
+                storage_path=f'scenes/{scene_id}.mp4',
+                content_type='video/mp4',
+            )
+        except Exception as up_err:
+            logger.warning(
+                f"Scene video upload failed for {scene_id}: {up_err} — "
+                "falling back to the local path, which will not survive a restart."
+            )
+        video_url = scene_public_url or f'/videos/{scene_id}.mp4'
 
         # Extract first-frame thumbnail and upload to Supabase. ~10 KB per
         # scene; gives the dashboard a real poster image instead of an icon.
@@ -1167,7 +1339,6 @@ def assemble_video():
         work_dir.mkdir(parents=True, exist_ok=True)
 
         video_paths = []           # per-scene videos with audio stitched in
-        per_scene_audio_paths = [] # per-scene narration mp3s, for the final voice track
         scene_local_files = []     # local intermediates to delete on success
         total_duration = 0
 
@@ -1193,6 +1364,27 @@ def assemble_video():
                     stem = Path(base).stem
                     scene_local_files.append(OUTPUT_DIR / f'{stem}_thumb.jpg')
 
+                # Append a scene that has no usable narration, normalised so it
+                # carries the same h264 + aac layout as the stitched scenes.
+                # Appending the raw Manim mp4 here (video only) is what used to
+                # break the final concat.
+                def append_silent(reason):
+                    silent_path = work_dir / f"{video_path.stem}_silent.mp4"
+                    try:
+                        ensure_audio_track(video_path, silent_path)
+                        video_paths.append(silent_path)
+                    except Exception as norm_err:
+                        logger.error(
+                            f"Could not add a silent track to scene "
+                            f"{scene.get('sceneNumber')}: {norm_err} — appending as-is; "
+                            "the concat will fall back to re-encoding."
+                        )
+                        video_paths.append(video_path)
+                    logger.warning(
+                        f"Scene {scene.get('sceneNumber')} has no narration ({reason}) "
+                        "— using a silent track."
+                    )
+
                 # Stitch audio if provided.
                 if audio_url:
                     try:
@@ -1201,18 +1393,19 @@ def assemble_video():
                             stitched_path = work_dir / f"{video_path.stem}_with_audio.mp4"
                             stitch_audio_video(video_path, audio_path, stitched_path)
                             video_paths.append(stitched_path)
-                            per_scene_audio_paths.append(audio_path)
                             logger.info(f"✓ Stitched audio into scene {scene.get('sceneNumber')}")
                         else:
-                            logger.warning(f"Audio file missing after fetch: {audio_path}")
-                            video_paths.append(video_path)
+                            append_silent('audio file missing after fetch')
                     except Exception as stitch_err:
                         logger.error(f"Audio stitch failed for scene {scene.get('sceneNumber')}: {stitch_err}")
-                        video_paths.append(video_path)
+                        append_silent('stitch failed')
                     if audio_url.startswith('/audio/'):
                         scene_local_files.append(AUDIO_DIR / audio_url[len('/audio/'):])
-                else:
+                elif has_audio_stream(video_path):
+                    # Already carries audio somehow — leave it alone.
                     video_paths.append(video_path)
+                else:
+                    append_silent('no audioUrl on the scene')
 
                 total_duration += scene.get('duration', 0)
 
@@ -1246,29 +1439,14 @@ def assemble_video():
             else:
                 logger.info("✓ Final video stored locally (no cloud storage configured)")
 
-            # Concatenate per-scene narration into a single final voice track
-            # and upload as audio/<storyboardId>_final.mp3. Skip silently if
-            # there were no per-scene audio files (edge case).
+            # NOTE: a concatenated <storyboardId>_final.mp3 used to be built here
+            # and written to AUDIO_DIR. Removed — it was pure waste: the same
+            # narration is already muxed into the final mp4, the assemble
+            # response's audio field is not persisted (AssembleResult in
+            # services/renderer.ts has no audioUrl), there is no finalAudioUrl
+            # column, and nothing ever deleted the file. Every assembly left one
+            # behind on an ephemeral disk, plus an ffmpeg re-encode nobody used.
             audio_url = None
-            if per_scene_audio_paths:
-                try:
-                    final_audio_local = work_dir / f'{storyboard_id}_final.mp3'
-                    concatenate_audio(per_scene_audio_paths, final_audio_local)
-                    persistent_audio = AUDIO_DIR / f'{storyboard_id}_final.mp3'
-                    shutil.copy(str(final_audio_local), str(persistent_audio))
-
-                    # Deliberately NOT uploaded to Supabase. This track is
-                    # the same narration already muxed into the final mp4, and
-                    # nothing reads it: the assemble response's audio field is
-                    # not persisted (see server/src/services/renderer.ts
-                    # AssembleResult) and there is no finalAudioUrl column. It
-                    # used to be pushed to `audio/<slug>.mp3`, which just grew
-                    # write-only files. The bucket holds final stitched videos
-                    # only; the local copy stays for renderer-side debugging.
-                    audio_url = f'/audio/{storyboard_id}_final.mp3'
-                    logger.info(f"✓ Final voice track kept locally: {persistent_audio.name}")
-                except Exception as audio_err:
-                    logger.error(f"Final voice concat/upload failed: {audio_err}")
 
             # Storage policy:
             #   per-scene mp4s -> stay on local disk
@@ -1365,9 +1543,23 @@ def text_to_speech():
 
         logger.info(f"✅ TTS complete: {mp3_path.name} ({duration}s, took {elapsed}s)")
 
-        # Per-scene narration stays on local disk; only the final concatenated
-        # voice track is uploaded to Supabase by /assemble.
-        audio_url = f'/audio/{scene_id}.mp3'
+        # Uploaded for the same reason as the scene video: scene.audioUrl is
+        # stored in the database as a durable pointer, and this disk is not.
+        # Without it, a restart between narration and render meant assembly
+        # found no audio and stitched the scene silent.
+        audio_public_url = None
+        try:
+            audio_public_url = upload_to_storage(
+                local_path=str(mp3_path),
+                storage_path=f'audio/{scene_id}.mp3',
+                content_type='audio/mpeg',
+            )
+        except Exception as up_err:
+            logger.warning(
+                f"Scene audio upload failed for {scene_id}: {up_err} — "
+                "falling back to the local path, which will not survive a restart."
+            )
+        audio_url = audio_public_url or f'/audio/{scene_id}.mp3'
 
         return jsonify({
             'success': True,
@@ -1431,7 +1623,16 @@ def delete_final():
     """
     try:
         data = request.json or {}
-        urls = [u for u in (data.get('videoUrl'), data.get('audioUrl')) if u]
+        # `urls` is the general form, used when a storyboard is deleted and
+        # every per-scene object has to go with it. videoUrl/audioUrl are kept
+        # for the rebuild path that predates it.
+        extra = data.get('urls') or []
+        if not isinstance(extra, list):
+            extra = []
+        urls = [u for u in (data.get('videoUrl'), data.get('audioUrl'), *extra) if u]
+        # De-duplicate but keep order: scenes can legitimately share a URL, and
+        # removing the same object twice reports a spurious failure.
+        urls = list(dict.fromkeys(urls))
 
         deleted, missing, failed = [], [], []
 
@@ -1445,6 +1646,27 @@ def delete_final():
                 except Exception as e:
                     failed.append({'path': storage_path, 'error': str(e)[:200]})
                     logger.warning(f"⚠️  Could not delete {storage_path}: {e}")
+                # Remove the local twin too. Uploading keeps a copy on disk so
+                # same-session assembly can skip the download, so deleting only
+                # the bucket object would leave that copy behind forever —
+                # exactly the disk growth this cleanup exists to avoid.
+                basename = storage_path.split('/')[-1]
+                twins = [OUTPUT_DIR / basename, AUDIO_DIR / basename]
+                # The thumbnail is the one object whose local name differs from
+                # its storage name: uploaded as thumbnails/<sceneId>.jpg but
+                # written to disk as <sceneId>_thumb.jpg by extract_thumbnail.
+                # Matching on the basename alone therefore never finds it, and
+                # a ~10 KB jpg per scene was left behind on every cleanup.
+                if storage_path.startswith('thumbnails/'):
+                    twins.append(OUTPUT_DIR / f'{Path(basename).stem}_thumb.jpg')
+                for twin in twins:
+                    try:
+                        if twin.exists():
+                            twin.unlink()
+                            deleted.append(str(twin))
+                            logger.info(f"🗑️  Deleted local twin: {twin.name}")
+                    except Exception as e:
+                        failed.append({'path': str(twin), 'error': str(e)[:200]})
                 continue
 
             local_path = _local_path_from_url(url)
@@ -1613,6 +1835,31 @@ if __name__ == '__main__':
     logger.info("="*50)
     logger.info(f"Output directory: {OUTPUT_DIR}")
     logger.info(f"Temp directory: {TEMP_DIR}")
+    # Stated explicitly at startup because the failure is otherwise silent:
+    # with no credentials, upload_to_storage returns None and every scene and
+    # final video falls back to a container-local path that does not survive a
+    # restart — and nothing says so until the files are already gone.
+    logger.info(
+        f"Render concurrency: {MAX_CONCURRENT_RENDERS} "
+        f"(queue timeout {RENDER_QUEUE_TIMEOUT}s)"
+    )
+    if RENDERER_SHARED_SECRET:
+        logger.info("Auth: ENABLED (X-Renderer-Token required)")
+    else:
+        logger.warning(
+            "Auth: DISABLED — RENDERER_SHARED_SECRET is not set. /render-code "
+            "executes arbitrary Python, so anyone who can reach this service can "
+            "run code in this container and read SUPABASE_SERVICE_ROLE_KEY. Set "
+            "the variable here AND on the API server to close it."
+        )
+    if USE_CLOUD_STORAGE:
+        logger.info(f"Cloud storage: ENABLED -> bucket '{SUPABASE_BUCKET}'")
+    else:
+        logger.warning(
+            "Cloud storage: DISABLED (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY "
+            "not set). Scene and final videos stay on local disk only and will "
+            "be lost when this container restarts."
+        )
     logger.info("Starting server...")
     
     is_debug = os.getenv('DEBUG', 'False').lower() == 'true'

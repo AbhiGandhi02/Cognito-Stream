@@ -23,8 +23,14 @@ piper-tts==1.2.0
 # to local filesystem and the import is unused.
 supabase==2.7.4
 
-# Production server
-gunicorn==21.2.0
+# NOTE: gunicorn was listed here but never used — app.py runs Flask's own
+# server. Removed rather than left as a false signal.
+#
+# Before adopting it, note that MAX_CONCURRENT_RENDERS is a
+# threading.BoundedSemaphore, which is PER PROCESS. Under `gunicorn --workers N`
+# the cap becomes N x the intended value and the global limit silently stops
+# being global. Use `--workers 1 --threads N`, or move the limit to something
+# shared (a file lock or Redis), before switching.
 
 # Monitoring
 psutil==5.9.6

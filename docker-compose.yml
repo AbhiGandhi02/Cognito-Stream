@@ -27,6 +27,16 @@ services:
       - SUPABASE_URL=${SUPABASE_URL:-}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
       - SUPABASE_STORAGE_BUCKET=${SUPABASE_STORAGE_BUCKET:-cognito-stream}
+      # Shared secret proving a request came from the API server. /render-code
+      # executes arbitrary Python, so with this unset the service will serve any
+      # caller and warn at startup. Must match the API server's value.
+      - RENDERER_SHARED_SECRET=${RENDERER_SHARED_SECRET:-}
+      # Global cap on simultaneous Manim renders. SCENE_CONCURRENCY on the API
+      # server only limits scenes within ONE storyboard, so without this two
+      # users generating at once run 2x that many processes. Defaults to the
+      # container's CPU count when unset.
+      - MAX_CONCURRENT_RENDERS=${MAX_CONCURRENT_RENDERS:-}
+      - RENDER_QUEUE_TIMEOUT=${RENDER_QUEUE_TIMEOUT:-240}
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:5000/health" ]

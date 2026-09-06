@@ -13,9 +13,25 @@
  * fallback when TTS is unavailable).
  */
 
-// Piper's default English voices land close to 150 words per minute.
-// Deliberately matches the char-based fallback in elevenlabs.ts (~15 chars/s).
-const WORDS_PER_SECOND = 2.5;
+// Measured, not assumed. 18 narrations of 6-45 words were synthesised through
+// the configured Piper voice (en_GB-jenny_dioco-medium) and probed with ffprobe;
+// least-squares over those samples gives 2.91 words/second, i.e. ~175 wpm — not
+// the ~150 wpm this previously assumed. The old 2.5 over-estimated every scene
+// in the 30-70 word band the planner produces by ~21% on average, so each
+// animation was built to outlast its narration and ended on 2-3s of silence
+// that ffmpeg padded in.
+//
+// An affine model (fixed per-clip overhead + a rate) was tried and rejected:
+// on 18 samples the intercept collapses to 0.34s and a pure rate fits better
+// (max error 16.6% vs 20.0%).
+//
+// VOICE-SPECIFIC. Re-measure if PIPER_VOICE changes.
+//
+// Residual error is ~16% at worst and is irreducible from word count alone —
+// two 45-word narrations in the sample measured 14.55s and 17.29s, because
+// punctuation and phrasing drive pauses. Only measuring the real audio before
+// generating the animation removes that; see resolveSceneDuration below.
+const WORDS_PER_SECOND = 2.9;
 
 // Manim needs a beat to open, draw and settle. Below this a scene is on screen
 // too briefly to read, however short its narration is.
