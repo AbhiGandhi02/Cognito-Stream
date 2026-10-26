@@ -13,7 +13,11 @@
 // user-facing routers only — /api/admin deliberately keeps the raw text.
 
 import { Request, Response, NextFunction } from 'express';
-import { toUserMessage, classifyUserError } from '../services/userFacingError';
+import {
+  toUserMessage,
+  classifyUserError,
+  isUserFacingMessage,
+} from '../services/userFacingError';
 
 // Deep enough for { ...storyboard, scenes: [ { ...scene } ] } and arrays of
 // storyboards. Bounded so a cyclic or unexpectedly deep payload can't spin.
@@ -74,7 +78,7 @@ export function sanitizeUserErrors(_req: Request, res: Response, next: NextFunct
         !Array.isArray(safe)
       ) {
         const envelope = safe as Record<string, unknown>;
-        if (typeof envelope.message === 'string') {
+        if (typeof envelope.message === 'string' && !isUserFacingMessage(envelope.message)) {
           safe = { ...envelope, message: classifyUserError(envelope.message).message };
         }
       }

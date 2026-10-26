@@ -56,7 +56,7 @@ interface StoryboardDiag {
     title: string;
     prompt: string;
     description: string;
-    status: 'draft' | 'processing' | 'completed' | 'failed';
+    status: 'planning' | 'draft' | 'processing' | 'completed' | 'failed';
     errorMessage: string | null;
     totalDuration: number | null;
     createdAt: string;
@@ -80,6 +80,7 @@ function StatusBadge({ status }: { status: string }) {
     const styles: Record<string, string> = {
         completed: 'bg-success/15 border-success/30 text-success',
         processing: 'bg-warning/15 border-warning/30 text-warning',
+        planning: 'bg-warning/15 border-warning/30 text-warning',
         failed: 'bg-danger/15 border-danger/30 text-danger',
         draft: 'bg-white/5 border-white/10 text-slate-400',
         pending: 'bg-white/5 border-white/10 text-slate-500',
@@ -89,14 +90,14 @@ function StatusBadge({ status }: { status: string }) {
             ? CheckCircle2
             : status === 'failed'
                 ? XCircle
-                : status === 'processing'
+                : status === 'processing' || status === 'planning'
                     ? Loader2
                     : Clock;
     return (
         <span
             className={`inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded-md border ${styles[status] || styles.draft}`}
         >
-            <Icon className={`w-3 h-3 ${status === 'processing' ? 'animate-spin' : ''}`} />
+            <Icon className={`w-3 h-3 ${status === 'processing' || status === 'planning' ? 'animate-spin' : ''}`} />
             {status}
         </span>
     );

@@ -10,6 +10,7 @@ import { motion } from 'framer-motion';
 import { ArrowLeft, RefreshCcw, Search, Film, Clock, Pencil, Trash2, Check, X, Play } from 'lucide-react';
 import { api, type Storyboard } from '../services/api';
 import { resolveFinalVideoUrl } from '../data/demos';
+import { ErrorBanner } from '../components/ErrorBanner';
 
 /**
  * HistoryThumb — 16:9 preview tile for a row. Rests on the first decoded frame
@@ -69,6 +70,8 @@ function statusPill(status: string): { label: string; className: string } {
     switch (status) {
         case 'completed':
             return { label: 'Completed', className: 'bg-success/10 text-success border-success/20' };
+        case 'planning':
+            return { label: 'Planning', className: 'bg-warning/10 text-warning border-warning/20' };
         case 'processing':
             return { label: 'Processing', className: 'bg-warning/10 text-warning border-warning/20' };
         case 'failed':
@@ -233,11 +236,7 @@ export function HistoryPage() {
                 </div>
 
                 {/* Error */}
-                {error && (
-                    <div className="rounded-xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger mb-6">
-                        {error}
-                    </div>
-                )}
+                {error && <ErrorBanner message={error} className="mb-6" />}
 
                 {/* List */}
                 {loading ? (

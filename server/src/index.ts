@@ -144,13 +144,22 @@ app.get('/videos/:filename', async (req, res) => {
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   // Full detail to the logs; only the mapped message goes over the wire.
   console.error('❌ Server Error:', err);
-  const status = err.status || 500;
-  res.status(status).json({
-    error: err.name || 'Internal Server Error',
-    message:
-      status >= 500
-        ? classifyUserError(err?.message).message
-        : err.message || 'Something went wrong',
+  const explicitStatus = typeof err?.status === 'number' ? err.status : undefined;
+  if (explicitStatus && explicitStatus < 500) {
+    return res.status(explicitStatus).json({
+      error: err.name || 'Bad Request',
+      message: err.message || 'Something went wrong',
+    });
+  }
+  // Provider errors are plain Errors with the upstream status buried in the
+  // message ("[Gemini:primary] 503 — …"), so derive the status from the
+  // classification rather than defaulting everything to 500.
+  const classified = classifyUserError(err?.message);
+  return res.status(explicitStatus ?? classified.status).json({
+    error: classified.reason,
+    code: classified.code,
+    message: classified.message,
+    retryable: classified.retryable,
   });
 });
 

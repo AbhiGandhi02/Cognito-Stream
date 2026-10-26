@@ -1,4 +1,4 @@
-import axios, { type AxiosInstance } from 'axios';
+import axios, { type AxiosError, type AxiosInstance } from 'axios';
 import { supabase } from '../lib/supabase';
 
 // Types
@@ -26,8 +26,12 @@ export interface Storyboard {
   title: string;
   description: string;
   prompt: string;
-  status: 'draft' | 'processing' | 'completed' | 'failed';
+  // 'planning': created, scenes still being planned in the background.
+  // 'failed' with no scenes means planning itself failed — see retryPlanning.
+  status: 'planning' | 'draft' | 'processing' | 'completed' | 'failed';
   finalVideoUrl?: string;
+  // User-safe reason the storyboard failed (sanitized by the server).
+  errorMessage?: string | null;
   totalDuration?: number;
   scenes: Scene[];
   createdAt: string;
@@ -47,6 +51,65 @@ export interface UpdateSceneRequest {
   visualDescription?: string;
   // Raw Python source containing `class GeneratedScene(...)`.
   manimCode?: string;
+}
+
+/**
+ * Error thrown for every failed API call. The server sends
+ * { error: <reason>, message: <user-safe detail> }; axios would otherwise
+ * surface only "Request failed with status code 500" and drop both.
+ * `message` is "<reason> (<status>): <detail>" so existing
+ * setError(err.message) call sites show the cause without changes.
+ */
+export class ApiError extends Error {
+  readonly reason: string;
+  readonly detail: string;
+  readonly status?: number;
+  readonly retryable?: boolean;
+
+  constructor(reason: string, detail: string, status?: number, retryable?: boolean) {
+    super(`${reason}${status ? ` (${status})` : ''}: ${detail}`);
+    this.name = 'ApiError';
+    this.reason = reason;
+    this.detail = detail;
+    this.status = status;
+    this.retryable = retryable;
+  }
+}
+
+function toApiError(error: AxiosError): ApiError {
+  if (!error.response) {
+    if (error.code === 'ECONNABORTED') {
+      return new ApiError('Request timed out', 'The server took too long to respond. Please try again.', undefined, true);
+    }
+    return new ApiError("Can't reach the server", 'Check your connection and try again.', undefined, true);
+  }
+
+  const { status } = error.response;
+  const data = (error.response.data ?? {}) as {
+    error?: unknown;
+    message?: unknown;
+    retryable?: unknown;
+    details?: unknown;
+  };
+  const reason =
+    typeof data.error === 'string' && data.error ? data.error : `Request failed`;
+  // Validation errors put the useful text ("Prompt must be at least 10
+  // characters") in details[]; the top-level message is generic.
+  const firstDetail = Array.isArray(data.details)
+    ? (data.details as Array<{ message?: unknown }>).find((d) => typeof d?.message === 'string')
+    : undefined;
+  const detail =
+    typeof firstDetail?.message === 'string'
+      ? firstDetail.message
+      : typeof data.message === 'string' && data.message
+        ? data.message
+        : 'Something went wrong. Please try again.';
+  return new ApiError(
+    reason,
+    detail,
+    status,
+    typeof data.retryable === 'boolean' ? data.retryable : undefined
+  );
 }
 
 // API Client Class
@@ -86,7 +149,7 @@ class CognitoStreamAPI {
             window.location.href = '/login';
           }
         }
-        return Promise.reject(error);
+        return Promise.reject(axios.isAxiosError(error) ? toApiError(error) : error);
       }
     );
   }
@@ -243,6 +306,15 @@ class CognitoStreamAPI {
    */
   async renderStoryboard(id: string): Promise<Storyboard> {
     const response = await this.client.post(`/api/storyboard/${id}/render`);
+    return response.data;
+  }
+
+  /**
+   * Re-run planning for a storyboard whose planning failed. Returns at once
+   * with status='planning'; poll until it becomes 'draft' or 'failed'.
+   */
+  async retryPlanning(id: string): Promise<Storyboard> {
+    const response = await this.client.post(`/api/storyboard/${id}/plan`);
     return response.data;
   }
 

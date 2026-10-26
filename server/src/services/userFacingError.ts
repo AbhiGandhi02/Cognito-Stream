@@ -19,66 +19,104 @@ export type UserErrorCode =
   | 'content'       // the model refused or returned unusable output
   | 'timeout'
   | 'render'        // Manim/renderer failure
+  | 'interrupted'   // server restarted mid-job
   | 'unknown';
 
 export interface UserFacingError {
   code: UserErrorCode;
+  /** Short headline for the cause, e.g. "AI service overloaded". */
+  reason: string;
   /** Safe to show to any user. */
   message: string;
+  /** HTTP status an API response for this error should carry. */
+  status: number;
   /** True when trying again later is likely to work. */
   retryable: boolean;
 }
 
-const RULES: Array<{ code: UserErrorCode; test: RegExp; message: string; retryable: boolean }> = [
+// Status codes are matched only when they stand alone ("] 503 —", "[503 ]",
+// "status code 502"). A plain \b5\d{2}\b also hit source positions in stack
+// text — a Prisma error at "storyboard.ts:553:48" was reported to users as an
+// AI overload, with a 503.
+const RULES: Array<{
+  code: UserErrorCode;
+  test: RegExp;
+  reason: string;
+  message: string;
+  status: number;
+  retryable: boolean;
+}> = [
   {
     code: 'capacity',
     // Matches our own quota wording plus Google's ("exceeded your current
     // quota", RESOURCE_EXHAUSTED, 429).
-    test: /\b429\b|resource[_ ](?:has been )?exhausted|quota|rate[ -]?limit|too many requests|cool(?:ing down|down)/i,
+    test: /(?<![\w:.])429(?![\w:.])|resource[_ ](?:has been )?exhausted|quota|rate[ -]?limit|too many requests|cool(?:ing down|down)/i,
+    reason: 'AI usage limit reached',
     message:
       'We’ve hit our AI capacity limit for the moment. Your work is saved — please try again in a few minutes.',
+    status: 429,
     retryable: true,
   },
   {
     code: 'upstream',
-    test: /\b5\d{2}\b|high demand|overloaded|service unavailable|try again later|unavailable/i,
+    test: /(?<![\w:.])5\d{2}(?![\w:.])|high demand|overloaded|service unavailable|try again later|unavailable/i,
+    reason: 'AI service overloaded',
     message:
       'The AI service is temporarily overloaded. Your work is saved — please try again in a moment.',
+    status: 503,
     retryable: true,
   },
   {
     code: 'config',
     // An auth failure is our misconfiguration; never blame or expose it.
-    test: /\b40[13]\b|api[_ ]key|unauthenticated|permission[_ ]denied|not configured|invalid authentication/i,
+    test: /(?<![\w:.])40[13](?![\w:.])|api[_ ]key|unauthenticated|permission[_ ]denied|not configured|invalid authentication/i,
+    reason: 'Server configuration problem',
     message:
       'Something is misconfigured on our side and the team has been notified. Please try again later.',
+    status: 500,
     retryable: false,
   },
   {
     code: 'timeout',
     test: /timeout|timed out|ETIMEDOUT|ECONNRESET|socket hang up/i,
+    reason: 'Request timed out',
     message: 'That took too long to complete. Please try again.',
+    status: 504,
     retryable: true,
   },
   {
     code: 'render',
     test: /manim|render(er)?\b|ffmpeg|latex|GeneratedScene|validation failed/i,
+    reason: 'Animation render failed',
     message:
       'We couldn’t render this scene’s animation. Try regenerating it, or tweak the scene description.',
+    status: 500,
     retryable: true,
   },
   {
     code: 'content',
     test: /safety|blocked|refus|empty (code|correction)?\s*response|truncated output/i,
+    reason: 'AI response unusable',
     message:
       'The AI couldn’t produce a usable animation for this scene. Try rewording the scene description.',
+    status: 502,
+    retryable: true,
+  },
+  {
+    code: 'interrupted',
+    test: /interrupted by a server restart/i,
+    reason: 'Generation interrupted',
+    message: 'Our server restarted while this was in progress. Please try again.',
+    status: 503,
     retryable: true,
   },
 ];
 
 const FALLBACK: UserFacingError = {
   code: 'unknown',
+  reason: 'Unexpected server error',
   message: 'Something went wrong generating this scene. Please try again.',
+  status: 500,
   retryable: true,
 };
 
@@ -94,10 +132,22 @@ export function classifyUserError(raw: unknown): UserFacingError {
 
   for (const rule of RULES) {
     if (rule.test.test(text)) {
-      return { code: rule.code, message: rule.message, retryable: rule.retryable };
+      const { test: _test, ...error } = rule;
+      return error;
     }
   }
   return FALLBACK;
+}
+
+const USER_MESSAGES = new Set([...RULES.map((r) => r.message), FALLBACK.message]);
+
+/**
+ * True when text is already one of our user-facing messages. Re-classifying
+ * those is lossy: "…try again in a few minutes" matches no rule and would
+ * collapse into the generic fallback.
+ */
+export function isUserFacingMessage(text: string): boolean {
+  return USER_MESSAGES.has(text);
 }
 
 /**

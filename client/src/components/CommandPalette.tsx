@@ -156,7 +156,7 @@ export function CommandPalette({
                                             <div
                                                 className={`w-1.5 h-1.5 rounded-full shrink-0 ${sb.status === 'completed'
                                                     ? 'bg-success'
-                                                    : sb.status === 'processing'
+                                                    : sb.status === 'processing' || sb.status === 'planning'
                                                         ? 'bg-warning animate-pulse'
                                                         : sb.status === 'failed'
                                                             ? 'bg-danger'

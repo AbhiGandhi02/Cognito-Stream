@@ -13,6 +13,7 @@ import { VideoPlayer } from '../components/VideoPlayer';
 import { GenerationTheater } from '../components/GenerationTheater';
 import { CommandPalette } from '../components/CommandPalette';
 import { ThemeToggle } from '../components/ThemeToggle';
+import { ErrorBanner } from '../components/ErrorBanner';
 import { useMe } from '../hooks/useMe';
 import { useAuth } from '../contexts/AuthContext';
 // Editable per-scene UI (Monaco editor + textareas) — re-enable when individual scene editing is needed.
@@ -244,6 +245,8 @@ export function DashboardPage() {
         try {
             // Two-step flow: create the storyboard in draft mode (no auto-render).
             // User reviews/edits scenes + Manim code, then clicks "Render Full Video".
+            // The server returns at once with status='planning' and plans the
+            // scenes in the background; the auto-poll below picks up the result.
             const sb = await api.createStoryboard({
                 prompt,
                 autoGenerate: false,
@@ -411,6 +414,31 @@ export function DashboardPage() {
         }
     };
 
+    const [retryingPlan, setRetryingPlan] = useState(false);
+
+    const handleRetryPlanning = async () => {
+        if (!storyboard) return;
+        setRetryingPlan(true);
+        setError(undefined);
+        try {
+            const sb = await api.retryPlanning(storyboard.id);
+            setStoryboard(sb);
+            setStoryboards((prev) => prev.map((s) => (s.id === sb.id ? sb : s)));
+        } catch (err) {
+            setError((err as Error).message);
+        } finally {
+            setRetryingPlan(false);
+        }
+    };
+
+    // Planning failed — back to the prompt box with the prompt kept, so the
+    // user can reword it rather than retype it.
+    const handleEditPrompt = () => {
+        const original = storyboard?.prompt ?? '';
+        handleNewStoryboard();
+        setPrompt(original);
+    };
+
     const handleNewStoryboard = () => {
         setStoryboard(null);
         setPrompt('');
@@ -451,6 +479,7 @@ export function DashboardPage() {
         switch (status) {
             case 'completed':
                 return 'bg-success shadow-sm shadow-success/50';
+            case 'planning':
             case 'processing':
                 return 'bg-warning shadow-sm shadow-warning/50 animate-pulse';
             case 'failed':
@@ -813,11 +842,7 @@ export function DashboardPage() {
                             </div>
                         </div>
 
-                        {error && (
-                            <div className="rounded-xl border border-danger/20 bg-danger/10 px-4 py-2.5 text-sm text-danger">
-                                {error}
-                            </div>
-                        )}
+                        {error && <ErrorBanner message={error} />}
 
                         {/* Suggestions card */}
                         <div className="rounded-2xl border border-white/8 bg-white/3 backdrop-blur-md p-4 space-y-1">
@@ -852,6 +877,67 @@ export function DashboardPage() {
                         )}
                     </div>
                 </main>
+            ) : storyboard.status === 'planning' ||
+              (storyboard.status === 'failed' && !storyboard.scenes?.length) ? (
+                /* ====================== PLANNING VIEW ====================== */
+                <main className="flex-1 px-4 py-8">
+                    <div className="w-full max-w-3xl mx-auto space-y-5">
+                        <div className="glass-card rounded-2xl p-5">
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-[10px] uppercase tracking-widest text-primary-400 font-semibold mb-1">
+                                        {storyboard.status === 'planning' ? 'Planning Storyboard' : 'Planning Failed'}
+                                    </p>
+                                    <h2 className="text-xl font-bold text-slate-100 truncate">
+                                        {storyboard.title}
+                                    </h2>
+                                    {/* The placeholder title is the prompt itself;
+                                        only repeat the prompt once it's been renamed. */}
+                                    {storyboard.title !== storyboard.prompt.replace(/\s+/g, ' ').trim() && (
+                                        <p className="text-sm text-slate-500 mt-1 line-clamp-2">
+                                            {storyboard.prompt}
+                                        </p>
+                                    )}
+                                </div>
+                                <button
+                                    onClick={handleNewStoryboard}
+                                    className="text-xs text-slate-500 hover:text-slate-300 px-3 py-1.5 rounded-md border border-primary-500/10 hover:border-primary-500/20 transition-colors shrink-0"
+                                >
+                                    {storyboard.status === 'planning' ? 'Leave' : 'Discard'}
+                                </button>
+                            </div>
+                        </div>
+
+                        {error && <ErrorBanner message={error} />}
+
+                        {storyboard.status === 'planning' ? (
+                            <GenerationTheater phase="plan" done={0} total={0} />
+                        ) : (
+                            <div className="glass-card rounded-2xl p-5 space-y-4">
+                                <ErrorBanner
+                                    message={`We couldn't plan this storyboard: ${storyboard.errorMessage || 'Something went wrong. Please try again.'}`}
+                                />
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                        onClick={handleRetryPlanning}
+                                        disabled={retryingPlan}
+                                        className="btn-primary text-sm px-4 py-2 flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        <RefreshCcw className={`w-4 h-4 ${retryingPlan ? 'animate-spin' : ''}`} />
+                                        Try again
+                                    </button>
+                                    <button
+                                        onClick={handleEditPrompt}
+                                        className="btn-secondary text-sm px-4 py-2 flex items-center gap-1.5"
+                                    >
+                                        <Pencil className="w-4 h-4" />
+                                        Edit prompt
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </main>
             ) : storyboard.status === 'draft' ? (
                 /* ====================== REVIEW VIEW (compact list) ====================== */
                 <main className="flex-1 px-4 py-8">
@@ -883,11 +969,7 @@ export function DashboardPage() {
                         </div>
 
                         {/* Error */}
-                        {error && (
-                            <div className="rounded-xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">
-                                {error}
-                            </div>
-                        )}
+                        {error && <ErrorBanner message={error} />}
 
                         {/* Generation Theater — same staged card the render
                             step uses, so the code-gen step isn't a bare
@@ -1120,11 +1202,7 @@ export function DashboardPage() {
                         )}
 
                         {/* Error */}
-                        {error && (
-                            <div className="rounded-xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">
-                                {error}
-                            </div>
-                        )}
+                        {error && <ErrorBanner message={error} />}
 
                         {/* Failed status */}
                         {storyboard.status === 'failed' && !storyboard.finalVideoUrl && (

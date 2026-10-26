@@ -8,7 +8,7 @@ import { assembleStoryboard } from '../services/assembly';
 import { validateRequest } from '../middleware/validation';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { findDemoSource } from '../lib/demo';
-import { withVideoCost, assignVideoCost } from '../services/llmUsage';
+import { withVideoCost } from '../services/llmUsage';
 import { z } from 'zod';
 
 const router = Router();
@@ -66,6 +66,152 @@ async function processAllScenes(storyboardId: string): Promise<void> {
 }
 
 // ==========================================
+// HELPER: Plan a storyboard in the background
+// ==========================================
+//
+// Planning (brief + scene plan) is a minute or more of Gemini calls, longer
+// when the free-tier pacer or a 5xx retry kicks in. POST / used to hold the
+// request open for all of it, so the user sat on a spinning button with no
+// storyboard page to look at. Now the row is created first with
+// status='planning', the client navigates to it and polls, and this fills in
+// the scenes (→ 'draft') or records why it couldn't (→ 'failed').
+
+/** Ids being planned by THIS process — the stale-planning sweep skips them. */
+const planningInFlight = new Set<string>();
+
+/** Title shown while planning; replaced by the model's title unless renamed. */
+function placeholderTitle(prompt: string): string {
+  const oneLine = prompt.replace(/\s+/g, ' ').trim();
+  return oneLine.length > 80 ? `${oneLine.slice(0, 77)}…` : oneLine;
+}
+
+async function planStoryboard(
+  storyboardId: string,
+  prompt: string,
+  autoGenerate: boolean
+): Promise<void> {
+  if (planningInFlight.has(storyboardId)) return;
+  planningInFlight.add(storyboardId);
+  console.log(`📝 Planning storyboard ${storyboardId}: "${prompt.substring(0, 50)}..."`);
+
+  try {
+    const planned = await withVideoCost(storyboardId, async () => {
+      const storyboardData = await generateStoryboard(prompt);
+
+      return prisma.$transaction(async (tx) => {
+        // Re-read inside the transaction: the user may have deleted the
+        // storyboard, or renamed it, while the model was thinking.
+        const current = await tx.storyboard.findUnique({
+          where: { id: storyboardId },
+          select: { status: true, title: true },
+        });
+        if (!current || current.status !== 'planning') return false;
+
+        const scenes = storyboardData.scenes.map((scene, index) => ({
+          storyboardId,
+          sceneNumber: index + 1,
+          narration: scene.narration,
+          visualDescription: scene.visualDescription,
+          manimCode: JSON.stringify(scene.manimOperations),
+          estimatedDuration: scene.estimatedDuration,
+          status: 'pending',
+        }));
+        await tx.scene.createMany({ data: scenes });
+
+        await tx.storyboard.update({
+          where: { id: storyboardId },
+          data: {
+            title:
+              current.title === placeholderTitle(prompt)
+                ? storyboardData.title
+                : current.title,
+            description: storyboardData.description,
+            status: 'draft',
+            errorMessage: null,
+            // Persist the brief. It decides the worked example every scene is
+            // built around, and was previously thrown away after planning — so a
+            // scene retried an hour later had to infer that example from its own
+            // description and whatever could be scraped out of sibling scenes.
+            brief: storyboardData.brief ? JSON.stringify(storyboardData.brief) : null,
+            totalDuration: scenes.reduce((sum, s) => sum + s.estimatedDuration, 0),
+          },
+        });
+        return true;
+      });
+    });
+
+    if (!planned) {
+      console.log(`🗑️  Storyboard ${storyboardId} was deleted or reset during planning — discarding plan.`);
+      return;
+    }
+    console.log(`✅ Storyboard ${storyboardId} planned.`);
+
+    // Auto-process scenes only when the client opts in (legacy default).
+    // For the AnimG-style "Review Spec → Iterate" flow, the client sends
+    // autoGenerate: false and triggers rendering later via POST /:id/render.
+    if (autoGenerate) {
+      console.log('🚀 Auto-processing all scenes...');
+      await processAllScenes(storyboardId);
+    } else {
+      console.log('📝 Storyboard created in draft mode (no auto-render).');
+      // Narration is NOT started here.
+      //
+      // It used to be, to hide TTS latency behind the user reading the
+      // storyboard. But narration is now uploaded to the bucket, and objects
+      // are only ever removed when a storyboard is deleted or pruned after a
+      // complete render — so every abandoned draft left its scene audio in
+      // storage permanently, with no cleanup path. A user who creates five
+      // drafts and renders one leaks four storyboards' worth.
+      //
+      // /api/scene/:id/generate-code calls ensureSceneAudio before deriving its
+      // timing budget, so the measured-audio guarantee is unaffected; the only
+      // loss is the latency hiding, roughly 2s per scene added to a code-gen
+      // loop that already spends 5-10s per scene on Gemini.
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`❌ Planning failed for storyboard ${storyboardId}:`, msg);
+    // updateMany so a storyboard deleted mid-plan is a no-op, not a throw.
+    // The raw message is stored for admins; user routes sanitize it.
+    await prisma.storyboard
+      .updateMany({
+        where: { id: storyboardId, status: 'planning' },
+        data: { status: 'failed', errorMessage: msg.slice(0, 2000) },
+      })
+      .catch((e) => console.error('❌ Could not record planning failure:', e));
+  } finally {
+    planningInFlight.delete(storyboardId);
+  }
+}
+
+// A row left in 'planning' with nothing working on it — the server restarted
+// mid-plan — would otherwise be polled by the dashboard forever. Fail it so the
+// user gets a retry button. Rows this process is planning are skipped; the age
+// floor covers an old instance still finishing during a zero-downtime deploy.
+const STALE_PLANNING_MS = 2 * 60 * 1000;
+
+async function failInterruptedPlanning(): Promise<void> {
+  try {
+    const { count } = await prisma.storyboard.updateMany({
+      where: {
+        status: 'planning',
+        id: { notIn: [...planningInFlight] },
+        updatedAt: { lt: new Date(Date.now() - STALE_PLANNING_MS) },
+      },
+      data: {
+        status: 'failed',
+        errorMessage: 'Storyboard planning was interrupted by a server restart.',
+      },
+    });
+    if (count > 0) console.log(`🧹 Marked ${count} interrupted planning storyboard(s) as failed.`);
+  } catch (err) {
+    console.error('❌ Stale-planning sweep failed:', (err as Error).message);
+  }
+}
+
+setInterval(failInterruptedPlanning, 60 * 1000).unref();
+
+// ==========================================
 // VALIDATION SCHEMAS (Latest Zod)
 // ==========================================
 
@@ -92,7 +238,7 @@ const updateStoryboardSchema = z.object({
 const listQuerySchema = z.object({
   limit: z.coerce.number().min(1).max(500).default(10),
   offset: z.coerce.number().min(0).default(0),
-  status: z.enum(['draft', 'processing', 'completed', 'failed']).optional(),
+  status: z.enum(['planning', 'draft', 'processing', 'completed', 'failed']).optional(),
   sortBy: z.enum(['createdAt', 'updatedAt', 'title']).default('createdAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
 });
@@ -401,98 +547,64 @@ router.post(
       return res.status(201).json(responseData);
     }
 
-    console.log(`📝 Generating storyboard for prompt: "${prompt.substring(0, 50)}..." (user ${userId})`);
-
-    // Brief + scene plan run before the row exists, so their cost has no id to
-    // attach to yet. One scope spans both the planning calls and the insert;
-    // assignVideoCost adopts it the moment the id is known, so the final
-    // per-video summary includes them rather than losing them.
-    const storyboard = await withVideoCost(null, async () => {
-    const storyboardData = await generateStoryboard(prompt);
-
-    const created = await prisma.$transaction(async (tx) => {
-      const newStoryboard = await tx.storyboard.create({
-        data: {
-          userId,
-          title: storyboardData.title,
-          description: storyboardData.description,
-          prompt,
-          status: 'draft',
-          // Persist the brief. It decides the worked example every scene is
-          // built around, and was previously thrown away after planning — so a
-          // scene retried an hour later had to infer that example from its own
-          // description and whatever could be scraped out of sibling scenes.
-          brief: storyboardData.brief ? JSON.stringify(storyboardData.brief) : null,
-          scenes: {
-            create: storyboardData.scenes.map((scene, index) => ({
-              sceneNumber: index + 1,
-              narration: scene.narration,
-              visualDescription: scene.visualDescription,
-              manimCode: JSON.stringify(scene.manimOperations),
-              estimatedDuration: scene.estimatedDuration,
-              status: 'pending',
-            })),
-          },
-        },
-        include: {
-          scenes: { orderBy: { sceneNumber: 'asc' } },
-        },
-      });
-
-      const totalDuration = newStoryboard.scenes.reduce(
-        (sum, scene) => sum + scene.estimatedDuration,
-        0
-      );
-
-      return tx.storyboard.update({
-        where: { id: newStoryboard.id },
-        data: { totalDuration },
-        include: {
-          scenes: { orderBy: { sceneNumber: 'asc' } },
-        },
-      });
-    });
-
-      assignVideoCost(created.id);
-      return created;
-    });
-
-    // Parse scenes for response
-    const responseData = {
-      ...storyboard,
-      scenes: storyboard.scenes.map(scene => ({
-        ...scene,
-        manimCode: safeParseManimCode(scene.manimCode || '{}'),
-      })),
-    };
-
-    // Auto-process scenes only when the client opts in (legacy default).
-    // For the AnimG-style "Review Spec → Iterate" flow, the client should send
-    // autoGenerate: false and trigger rendering later via POST /api/storyboard/:id/render.
+    // Create the row first and plan in the background — see planStoryboard.
+    // The client navigates straight to the storyboard page and polls it.
     const { autoGenerate } = req.body;
-    if (autoGenerate !== false) {
-      console.log('🚀 Auto-processing all scenes...');
-      processAllScenes(storyboard.id).catch(err => {
-        console.error('❌ Auto-generation failed:', err.message);
+    const storyboard = await prisma.storyboard.create({
+      data: {
+        userId,
+        title: placeholderTitle(prompt),
+        description: '',
+        prompt,
+        status: 'planning',
+      },
+      include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
+    });
+    console.log(`📝 Storyboard ${storyboard.id} created for user ${userId} — planning in background.`);
+
+    void planStoryboard(storyboard.id, prompt, autoGenerate !== false);
+
+    return res.status(202).json(storyboard);
+  })
+);
+
+/**
+ * POST /api/storyboard/:id/plan
+ * Retry planning for a storyboard whose planning failed (a Gemini outage, a
+ * server restart). Reuses the same row, so the user's link and history entry
+ * stay put. Returns immediately with status='planning'; the client polls.
+ */
+router.post(
+  '/:id/plan',
+  asyncHandler(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const userId = req.user!.id;
+
+    const existing = await prisma.storyboard.findFirst({
+      where: { id, userId },
+      include: { _count: { select: { scenes: true } } },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'Not Found', message: 'Storyboard not found' });
+    }
+    if (existing.status !== 'failed' || existing._count.scenes > 0) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'Only a storyboard whose planning failed can be re-planned.',
       });
-    } else {
-      console.log('📝 Storyboard created in draft mode (no auto-render).');
-      // Narration is NOT started here.
-      //
-      // It used to be, to hide TTS latency behind the user reading the
-      // storyboard. But narration is now uploaded to the bucket, and objects
-      // are only ever removed when a storyboard is deleted or pruned after a
-      // complete render — so every abandoned draft left its scene audio in
-      // storage permanently, with no cleanup path. A user who creates five
-      // drafts and renders one leaks four storyboards' worth.
-      //
-      // /api/scene/:id/generate-code calls ensureSceneAudio before deriving its
-      // timing budget, so the measured-audio guarantee is unaffected; the only
-      // loss is the latency hiding, roughly 2s per scene added to a code-gen
-      // loop that already spends 5-10s per scene on Gemini.
     }
 
-    return res.status(201).json(responseData);
+    const storyboard = await prisma.storyboard.update({
+      where: { id },
+      data: { status: 'planning', errorMessage: null },
+      include: { scenes: { orderBy: { sceneNumber: 'asc' } } },
+    });
+
+    // Re-planning a draft never auto-renders — the review flow is the only
+    // client that reaches this route.
+    void planStoryboard(id, existing.prompt, false);
+
+    return res.status(202).json(storyboard);
   })
 );
 
